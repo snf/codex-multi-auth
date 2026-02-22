@@ -6,6 +6,7 @@ dist/
 .history/
 opencode.json
 .opencode/
+.omx/
 tmp
 tmp*
 .tmp*/
