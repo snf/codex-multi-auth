@@ -873,8 +873,6 @@ For all options, see [docs/configuration.md](docs/configuration.md).
 
 ---
 
----
-
 ## Documentation
 
 - [Docs Portal](docs/README.md) - Navigation hub for all docs
