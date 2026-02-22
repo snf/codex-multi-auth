@@ -3,6 +3,7 @@
 This document explains the technical design decisions, architecture, and implementation details of the OpenAI Codex OAuth plugin for OpenCode.
 
 ## Table of Contents
+- [Repository Scope Map](./REPOSITORY_SCOPE.md)
 - [Architecture Overview](#architecture-overview)
 - [Stateless vs Stateful Mode](#stateless-vs-stateful-mode)
 - [Message ID Handling](#message-id-handling)

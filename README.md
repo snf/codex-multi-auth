@@ -829,12 +829,58 @@ For all options, see [docs/configuration.md](docs/configuration.md).
 
 ---
 
+## Repository Scope & Structure
+
+This repository has explicit ownership boundaries so feature work lands in the right place.
+
+```text
+.
+|-- index.ts                 # plugin entrypoint (request pipeline + tool registration)
+|-- lib/                     # runtime implementation
+|   |-- auth/                # OAuth login/callback/refresh
+|   |-- request/             # request transform + backend fetch helpers + SSE handling
+|   |-- prompts/             # Codex/OpenCode bridge prompts
+|   |-- storage/             # persistence paths + migrations
+|   |-- recovery/            # conversation/session recovery
+|   |-- codex-cli/           # Codex CLI sync/interop
+|   |-- tools/               # plugin command surface
+|   `-- ui/                  # TUI/formatting helpers
+|-- test/                    # unit/integration/property tests
+|-- scripts/                 # build/install utilities
+|-- config/                  # copy-paste config templates
+|-- docs/                    # user + developer docs
+`-- dist/                    # generated build output (do not edit)
+```
+
+### Where to implement changes
+
+- Plugin orchestration and tool registration: `index.ts`
+- OAuth and token lifecycle: `lib/auth/`
+- Model mapping and payload normalization: `lib/request/request-transformer.ts`, `lib/request/helpers/model-map.ts`
+- Multi-account rotation and health: `lib/accounts.ts`, `lib/rotation.ts`, `lib/health.ts`, `lib/circuit-breaker.ts`
+- Storage format and migration behavior: `lib/storage.ts`, `lib/storage/migrations.ts`, `lib/storage/paths.ts`
+- User-facing tools and display output: `lib/tools/hashline-tools.ts`, `lib/table-formatter.ts`
+- Tests for all behavior changes: `test/`
+
+### AGENTS Scope Hierarchy
+
+- `AGENTS.md` applies to the entire repo.
+- `lib/AGENTS.md` applies to `lib/**`.
+- `test/AGENTS.md` applies to `test/**`.
+
+Full ownership map: [docs/development/REPOSITORY_SCOPE.md](docs/development/REPOSITORY_SCOPE.md)
+
+---
+
 ## Documentation
 
-- [Getting Started](docs/getting-started.md) — Complete installation guide
-- [Configuration](docs/configuration.md) — All configuration options
-- [Troubleshooting](docs/troubleshooting.md) — Common issues and fixes
-- [Architecture](docs/development/ARCHITECTURE.md) — How the plugin works
+- [Docs Portal](docs/README.md) - Navigation hub for all docs
+- [Getting Started](docs/getting-started.md) - Complete installation guide
+- [Configuration](docs/configuration.md) - All configuration options
+- [Troubleshooting](docs/troubleshooting.md) - Common issues and fixes
+- [Architecture](docs/development/ARCHITECTURE.md) - How the plugin works
+- [Repository Scope Map](docs/development/REPOSITORY_SCOPE.md) - Path ownership, module boundaries, extension points
+- [Documentation Structure](docs/DOCUMENTATION.md) - How docs are organized in this repo
 
 ---
 

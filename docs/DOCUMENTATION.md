@@ -21,6 +21,7 @@ docs/
   troubleshooting.md           # operational debugging guide
   privacy.md                   # data handling notes
   development/
+    REPOSITORY_SCOPE.md        # canonical path ownership + extension points
     ARCHITECTURE.md            # technical design
     CONFIG_FLOW.md             # config resolution internals
     CONFIG_FIELDS.md           # config field semantics
@@ -37,6 +38,10 @@ docs/
 
 ## Notes
 
+- AGENTS hierarchy for source edits:
+  - `AGENTS.md` applies repository-wide.
+  - `lib/AGENTS.md` applies to `lib/**`.
+  - `test/AGENTS.md` applies to `test/**`.
 - `dist/` is build output and not a documentation source of truth.
 - `tmp*` files are release scratch artifacts and not part of user docs.
 - For user-facing guidance, start with `README.md` or `docs/getting-started.md`.

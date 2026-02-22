@@ -38,6 +38,7 @@
 
 | Guide | Description |
 |-------|-------------|
+| [Repository Scope Map](development/REPOSITORY_SCOPE.md) | Canonical ownership map for paths and extension points |
 | [Architecture](development/ARCHITECTURE.md) | Technical design, AI SDK compatibility |
 | [Config System](development/CONFIG_FLOW.md) | Configuration loading and merging |
 | [Config Fields](development/CONFIG_FIELDS.md) | Understanding config keys and fields |
