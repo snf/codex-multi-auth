@@ -65,6 +65,17 @@ Start here if you are implementing or auditing changes:
 |-- docs/
 `-- dist/ (generated)
 ```
+
+### Jump to section
+
+- [Installation](#installation)
+- [Models](#models)
+- [Multi-Account Setup](#multi-account-setup)
+- [Account Management Tools](#account-management-tools)
+- [Rotation Behavior](#rotation-behavior)
+- [Troubleshooting](#troubleshooting)
+- [Configuration](#configuration)
+- [Documentation](#documentation)
 ---
 
 <details open>
@@ -315,250 +326,75 @@ opencode auth login  # Run again to add more accounts
 
 ## Account Management Tools
 
-The plugin provides built-in tools for managing your OpenAI accounts. These are available directly in OpenCode — just ask the agent or type the tool name.
+The plugin provides built-in `codex-*` tools directly in OpenCode.
 
-> **Note:** Tools were renamed from `openai-accounts-*` to `codex-*` in v4.12.0 for brevity.
->
-> **Default v1 surface:** `codex-list`, `codex-switch`, `codex-status`, `codex-health`.
-> Advanced admin tools (`codex-metrics`, `codex-refresh`, `codex-remove`, `codex-export`, `codex-import`) are hidden by default and can be enabled with `CODEX_MULTI_AUTH_EXPOSE_ADMIN_TOOLS=1`.
-
-### Hashline Editing (Plain OpenCode)
-
-This plugin now provides a true hashline editing engine on plain OpenCode by overriding `edit` and adding `hashline_read`.
-
-Use this standard flow:
-
-1. Read hashline refs:
-
-```
-hashline_read path="src/file.ts"
-```
-
-2. Edit with hash-verified refs:
-
-```
-edit path="src/file.ts" lineRef="L42#deadbeef" operation="replace" content="new code"
-```
-
-3. Optional range edit:
-
-```
-edit path="src/file.ts" lineRef="L42#deadbeef" endLineRef="L44#feedcafe" operation="replace" content="replacement block"
-```
-
-4. Legacy fallback (still supported):
-
-```
-edit path="src/file.ts" oldString="from" newString="to"
-```
-
-No extra plugin is required. This works with plain OpenCode + `codex-multi-auth`.
-
----
-
-### codex-list
-
-List all configured accounts with their status.
-
-```
-codex-list
-```
-
-**Output:**
-```
-OpenAI Accounts (3 total):
-
-  [1] user@gmail.com (active)
-  [2] work@company.com
-  [3] backup@email.com
-
-Use codex-switch to change active account.
-```
-
----
-
-### codex-switch
-
-Switch to a different account by index (1-based).
-
-```
-codex-switch index=2
-```
-
-**Output:**
-```
-Switched to account [2] work@company.com
-```
-
----
-
-### codex-status
-
-Show detailed status including rate limits and health scores.
-
-```
-codex-status
-```
-
-**Output:**
-```
-OpenAI Account Status:
-
-[1] user@gmail.com (active)
-    Health: 100/100
-    Rate Limit: 45/50 requests remaining
-    Resets: 2m 30s
-    Last Used: 5 minutes ago
-
-[2] work@company.com
-    Health: 85/100
-    Rate Limit: 12/50 requests remaining
-    Resets: 8m 15s
-    Last Used: 1 hour ago
-```
-
----
-
-### Advanced Admin Tools (Optional)
-
-The following tools are available only when:
+- Default tools: `codex-list`, `codex-switch`, `codex-status`, `codex-health`
+- Advanced tools (hidden by default): `codex-metrics`, `codex-refresh`, `codex-remove`, `codex-export`, `codex-import`
+- Enable advanced tools with:
 
 ```bash
 CODEX_MULTI_AUTH_EXPOSE_ADMIN_TOOLS=1 opencode
 ```
 
----
+> Note: tools were renamed from `openai-accounts-*` to `codex-*` in v4.12.0.
 
-### codex-metrics
+### Quick command map
 
-Show live runtime metrics (request counts, latency, errors, rotations) for the current plugin process.
+| Tool | Availability | Purpose | Example |
+|---|---|---|---|
+| `codex-list` | Default | List configured accounts | `codex-list` |
+| `codex-switch` | Default | Switch active account by index | `codex-switch index=2` |
+| `codex-status` | Default | Show health, usage, reset timing | `codex-status` |
+| `codex-health` | Default | Validate account tokens (read-only) | `codex-health` |
+| `codex-metrics` | Advanced | Show runtime metrics for current plugin process | `codex-metrics` |
+| `codex-refresh` | Advanced | Refresh tokens and persist updates | `codex-refresh` |
+| `codex-remove` | Advanced | Remove account by index | `codex-remove index=3` |
+| `codex-export` | Advanced | Export accounts to JSON | `codex-export path="~/backup/accounts.json"` |
+| `codex-import` | Advanced | Import/merge accounts from JSON | `codex-import path="~/backup/accounts.json"` |
+| `hashline_read` | Default | Read hashline refs for deterministic edits | `hashline_read path="src/file.ts"` |
+| `edit` | Default | Hashline-capable edit engine (or legacy `oldString/newString`) | `edit path="src/file.ts" lineRef="L42#..." operation="replace" content="..."` |
 
-```
-codex-metrics
-```
+### Recommended day-to-day flow
 
-**Output:**
-```
-Codex Plugin Metrics:
+1. Run `codex-list` to see available accounts.
+2. If needed, switch active account with `codex-switch index=<n>`.
+3. Use `codex-status` when requests slow down or fail.
+4. Use `codex-health` to validate tokens.
+5. Use `codex-refresh` (advanced) after long idle periods.
 
-Uptime: 12m
-Total upstream requests: 84
-Successful responses: 77
-Failed responses: 7
-Average successful latency: 842ms
-```
+### Hashline editing (plain OpenCode)
 
----
+Use this standard flow:
 
-### codex-health
-
-Check if all account tokens are still valid (read-only check).
-
-```
-codex-health
-```
-
-**Output:**
-```
-Checking 3 account(s):
-
-  ✓ [1] user@gmail.com: Healthy
-  ✓ [2] work@company.com: Healthy
-  ✗ [3] old@expired.com: Token expired
-
-Summary: 2 healthy, 1 unhealthy
+```text
+hashline_read path="src/file.ts"
+edit path="src/file.ts" lineRef="L42#deadbeef" operation="replace" content="new code"
+edit path="src/file.ts" lineRef="L42#deadbeef" endLineRef="L44#feedcafe" operation="replace" content="replacement block"
+# legacy fallback remains supported:
+edit path="src/file.ts" oldString="from" newString="to"
 ```
 
----
+No extra plugin is required. This works with plain OpenCode + `codex-multi-auth`.
 
-### codex-refresh
+<details>
+<summary><b>Example outputs (condensed)</b></summary>
 
-Refresh all OAuth tokens and save them to disk. Use this after long idle periods.
+```text
+codex-list
+OpenAI Accounts (3 total):
+  [1] user@gmail.com (active)
+  [2] work@company.com
+  [3] backup@email.com
 
-```
+codex-status
+[1] user@gmail.com (active)  Health: 100/100  Rate Limit: 45/50  Resets: 2m 30s
+[2] work@company.com         Health:  85/100  Rate Limit: 12/50  Resets: 8m 15s
+
 codex-refresh
-```
-
-**Output:**
-```
-Refreshing 3 account(s):
-
-  ✓ [1] user@gmail.com: Refreshed
-  ✓ [2] work@company.com: Refreshed
-  ✗ [3] old@expired.com: Failed - Token expired
-
 Summary: 2 refreshed, 1 failed
 ```
 
-**Difference from health check:** `codex-health` only validates tokens. `codex-refresh` actually refreshes them and saves new tokens to disk.
-
----
-
-### codex-remove
-
-Remove an account by index. Useful for cleaning up expired accounts.
-
-```
-codex-remove index=3
-```
-
-**Output:**
-```
-Removed: [3] old@expired.com
-
-Remaining accounts: 2
-```
-
----
-
-### codex-export
-
-Export all accounts to a portable JSON file. Useful for backup or migration.
-
-```
-codex-export path="~/backup/accounts.json"
-```
-
-**Output:**
-```
-Exported 3 account(s) to ~/backup/accounts.json
-```
-
----
-
-### codex-import
-
-Import accounts from a JSON file (exported via `codex-export`). Merges with existing accounts.
-
-```
-codex-import path="~/backup/accounts.json"
-```
-
-**Output:**
-```
-Imported 2 new account(s) (1 duplicate skipped)
-
-Total accounts: 4
-```
-
----
-
-### Quick Reference
-
-| Tool | What It Does | Example |
-|------|--------------|---------|
-| `codex-list` | List all accounts | "list my accounts" |
-| `codex-switch` | Switch active account | "switch to account 2" |
-| `codex-status` | Show rate limits & health | "show account status" |
-| `codex-health` | Validate tokens (read-only) | "check account health" |
-| `codex-metrics` | Show runtime metrics (advanced, env-gated) | "show plugin metrics" |
-| `codex-refresh` | Refresh & save tokens (advanced, env-gated) | "refresh my tokens" |
-| `codex-remove` | Remove an account (advanced, env-gated) | "remove account 3" |
-| `codex-export` | Export accounts to file (advanced, env-gated) | "export my accounts" |
-| `codex-import` | Import accounts from file (advanced, env-gated) | "import accounts from backup" |
-| `hashline_read` | Read hashline refs for deterministic edits | "show hashline refs for src/file.ts" |
-| `edit` | Hashline-capable edit engine (or legacy oldString/newString) | "replace lineRef L42#... with new content" |
-
+</details>
 ---
 
 ## Rotation Behavior
