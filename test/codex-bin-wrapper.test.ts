@@ -206,6 +206,38 @@ describe("codex bin wrapper", () => {
 		expect(result.stdout).toContain("FORWARDED:--version");
 	});
 
+	it("runs best-account startup selection before forwarding non-auth commands", () => {
+		const fixtureRoot = createWrapperFixture();
+		const distLibDir = join(fixtureRoot, "dist", "lib");
+		mkdirSync(distLibDir, { recursive: true });
+		writeFileSync(
+			join(distLibDir, "codex-manager.js"),
+			[
+				"export async function autoPickBestAccountOnLaunchIfEnabled() {",
+				'\tconsole.log("STARTUP_BEST");',
+				"}",
+				"export async function autoSyncActiveAccountToCodex() {",
+				'\tconsole.log("STARTUP_SYNC");',
+				"\treturn true;",
+				"}",
+			].join("\n"),
+			"utf8",
+		);
+		const fakeBin = createFakeCodexBin(fixtureRoot);
+
+		const result = runWrapper(fixtureRoot, ["exec", "status"], {
+			CODEX_MULTI_AUTH_REAL_CODEX_BIN: fakeBin,
+		});
+
+		expect(result.status).toBe(0);
+		const bestIndex = result.stdout.indexOf("STARTUP_BEST");
+		const syncIndex = result.stdout.indexOf("STARTUP_SYNC");
+		const forwardIndex = result.stdout.indexOf("FORWARDED:exec status");
+		expect(bestIndex).toBeGreaterThanOrEqual(0);
+		expect(syncIndex).toBeGreaterThan(bestIndex);
+		expect(forwardIndex).toBeGreaterThan(syncIndex);
+	});
+
 	it("injects file auth store forwarding for wrapped real cli invocations by default", () => {
 		const fixtureRoot = createWrapperFixture();
 		const fakeBin = createFakeCodexBin(fixtureRoot);

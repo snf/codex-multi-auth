@@ -7,6 +7,7 @@ import { type MenuItem, select } from "../ui/select.js";
 export type BehaviorConfigAction =
 	| { type: "set-delay"; delayMs: number }
 	| { type: "toggle-pause" }
+	| { type: "toggle-auto-pick-best-account-on-launch" }
 	| { type: "toggle-menu-limit-fetch" }
 	| { type: "toggle-menu-fetch-status" }
 	| { type: "set-menu-quota-ttl"; ttlMs: number }
@@ -45,6 +46,8 @@ export async function promptBehaviorSettingsPanel(
 	while (true) {
 		const currentDelay = draft.actionAutoReturnMs ?? 2_000;
 		const pauseOnKey = draft.actionPauseOnKey ?? true;
+		const autoPickBestAccountOnLaunch =
+			draft.autoPickBestAccountOnLaunch ?? false;
 		const autoFetchLimits = draft.menuAutoFetchLimits ?? true;
 		const fetchStatusVisible = draft.menuShowFetchStatus ?? true;
 		const menuQuotaTtlMs = draft.menuQuotaTtlMs ?? 5 * 60_000;
@@ -80,6 +83,12 @@ export async function promptBehaviorSettingsPanel(
 				hint: "Press any key to stop auto-return.",
 				value: { type: "toggle-pause" },
 				color: pauseColor,
+			},
+			{
+				label: `${autoPickBestAccountOnLaunch ? "[x]" : "[ ]"} Auto-pick best account on codex launch`,
+				hint: "Runs the live best-account check before proxying to the real Codex CLI.",
+				value: { type: "toggle-auto-pick-best-account-on-launch" },
+				color: autoPickBestAccountOnLaunch ? "green" : "yellow",
 			},
 			{
 				label: `${autoFetchLimits ? "[x]" : "[ ]"} Auto-fetch limits on menu open (5m cache)`,
@@ -146,6 +155,8 @@ export async function promptBehaviorSettingsPanel(
 				if (lower === "s") return { type: "save" };
 				if (lower === "r") return { type: "reset" };
 				if (lower === "p") return { type: "toggle-pause" };
+				if (lower === "b")
+					return { type: "toggle-auto-pick-best-account-on-launch" };
 				if (lower === "l") return { type: "toggle-menu-limit-fetch" };
 				if (lower === "f") return { type: "toggle-menu-fetch-status" };
 				if (lower === "t")
@@ -176,6 +187,15 @@ export async function promptBehaviorSettingsPanel(
 		}
 		if (result.type === "toggle-pause") {
 			draft = { ...draft, actionPauseOnKey: !(draft.actionPauseOnKey ?? true) };
+			focus = result;
+			continue;
+		}
+		if (result.type === "toggle-auto-pick-best-account-on-launch") {
+			draft = {
+				...draft,
+				autoPickBestAccountOnLaunch:
+					!(draft.autoPickBestAccountOnLaunch ?? false),
+			};
 			focus = result;
 			continue;
 		}

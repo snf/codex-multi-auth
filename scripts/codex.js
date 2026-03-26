@@ -45,22 +45,47 @@ async function loadRunCodexMultiAuthCli() {
 	}
 }
 
+async function loadCodexManagerModule() {
+	try {
+		return await import("../dist/lib/codex-manager.js");
+	} catch (error) {
+		if (error && typeof error === "object" && "code" in error && error.code === "ERR_MODULE_NOT_FOUND") {
+			return null;
+		}
+		throw error;
+	}
+}
+
 async function autoSyncManagerActiveSelectionIfEnabled() {
 	const enabled = (process.env.CODEX_MULTI_AUTH_AUTO_SYNC_ON_STARTUP ?? "1").trim() !== "0";
 	if (!enabled) return;
 
 	try {
-		const mod = await import("../dist/lib/codex-manager.js");
+		const mod = await loadCodexManagerModule();
+		if (!mod) {
+			return;
+		}
 		if (typeof mod.autoSyncActiveAccountToCodex !== "function") {
 			return;
 		}
 		await mod.autoSyncActiveAccountToCodex();
 	} catch (error) {
-		if (error && typeof error === "object" && "code" in error && error.code === "ERR_MODULE_NOT_FOUND") {
-			// Non-auth command path should keep forwarding even if dist is missing.
+		// Best effort only: never block official Codex startup on sync failure.
+	}
+}
+
+async function autoPickBestAccountOnLaunchIfEnabled() {
+	try {
+		const mod = await loadCodexManagerModule();
+		if (!mod) {
 			return;
 		}
-		// Best effort only: never block official Codex startup on sync failure.
+		if (typeof mod.autoPickBestAccountOnLaunchIfEnabled !== "function") {
+			return;
+		}
+		await mod.autoPickBestAccountOnLaunchIfEnabled();
+	} catch {
+		// Best effort only: never block official Codex startup on selection failure.
 	}
 }
 
@@ -524,6 +549,7 @@ async function main() {
 		return 1;
 	}
 
+	await autoPickBestAccountOnLaunchIfEnabled();
 	await autoSyncManagerActiveSelectionIfEnabled();
 	const forwardArgs = buildForwardArgs(rawArgs);
 	return forwardToRealCodex(realCodexBin, forwardArgs);

@@ -228,6 +228,7 @@ const STATUSLINE_PANEL_KEYS = [
 const BEHAVIOR_PANEL_KEYS = [
 	"actionAutoReturnMs",
 	"actionPauseOnKey",
+	"autoPickBestAccountOnLaunch",
 	"menuAutoFetchLimits",
 	"menuShowFetchStatus",
 	"menuQuotaTtlMs",

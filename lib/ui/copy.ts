@@ -121,7 +121,7 @@ export const UI_COPY = {
 		summaryHelp: "Enter Toggle | 1-3 Toggle | [ ] Reorder | S Save | Q Back (No Save)",
 		behaviorTitle: "Return Behavior",
 		behaviorSubtitle: "Control how result screens return",
-		behaviorHelp: "Enter Select | 1-3 Delay | P Pause | L AutoFetch | F Status | T TTL | S Save | Q Back (No Save)",
+		behaviorHelp: "Enter Select | 1-3 Delay | P Pause | B BestOnLaunch | L AutoFetch | F Status | T TTL | S Save | Q Back (No Save)",
 		themeTitle: "Color Theme",
 		themeSubtitle: "Pick base color and accent",
 		themeHelp: "Enter Select | 1-2 Base | S Save | Q Back (No Save)",

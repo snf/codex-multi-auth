@@ -47,6 +47,7 @@ describe("dashboard settings", () => {
 			showLiveProbeNotes: false,
 			actionAutoReturnMs: 1_000,
 			actionPauseOnKey: false,
+			autoPickBestAccountOnLaunch: true,
 			uiThemePreset: "blue",
 			uiAccentColor: "cyan",
 		});
@@ -60,6 +61,7 @@ describe("dashboard settings", () => {
 			showLiveProbeNotes: false,
 			actionAutoReturnMs: 1_000,
 			actionPauseOnKey: false,
+			autoPickBestAccountOnLaunch: true,
 			menuAutoFetchLimits: true,
 			menuSortEnabled: true,
 			menuSortMode: "ready-first",
@@ -300,6 +302,7 @@ describe("dashboard settings", () => {
 			showLiveProbeNotes: "nope",
 			actionAutoReturnMs: Number.NaN,
 			actionPauseOnKey: "nope",
+			autoPickBestAccountOnLaunch: "nope",
 			menuAutoFetchLimits: "nope",
 			menuSortEnabled: "nope",
 			menuSortMode: "invalid",
@@ -339,6 +342,7 @@ describe("dashboard settings", () => {
 			showLiveProbeNotes: false,
 			actionAutoReturnMs: 12_345,
 			actionPauseOnKey: false,
+			autoPickBestAccountOnLaunch: true,
 			menuAutoFetchLimits: false,
 			menuSortEnabled: true,
 			menuSortMode: "manual",
@@ -368,6 +372,7 @@ describe("dashboard settings", () => {
 		});
 
 		expect(normalized.actionAutoReturnMs).toBe(10_000);
+		expect(normalized.autoPickBestAccountOnLaunch).toBe(true);
 		expect(normalized.menuQuotaTtlMs).toBe(60_000);
 		expect(normalized.menuSortMode).toBe("manual");
 		expect(normalized.uiThemePreset).toBe("blue");

@@ -23,6 +23,7 @@ export interface DashboardDisplaySettings {
 	showLiveProbeNotes: boolean;
 	actionAutoReturnMs?: number;
 	actionPauseOnKey?: boolean;
+	autoPickBestAccountOnLaunch?: boolean;
 	menuAutoFetchLimits?: boolean;
 	menuSortEnabled?: boolean;
 	menuSortMode?: DashboardAccountSortMode;
@@ -56,6 +57,7 @@ export const DEFAULT_DASHBOARD_DISPLAY_SETTINGS: DashboardDisplaySettings = {
 	showLiveProbeNotes: true,
 	actionAutoReturnMs: 2_000,
 	actionPauseOnKey: true,
+	autoPickBestAccountOnLaunch: false,
 	menuAutoFetchLimits: true,
 	menuSortEnabled: true,
 	menuSortMode: "ready-first",
@@ -326,6 +328,10 @@ export function normalizeDashboardDisplaySettings(
 		actionPauseOnKey: normalizeBoolean(
 			value.actionPauseOnKey,
 			DEFAULT_DASHBOARD_DISPLAY_SETTINGS.actionPauseOnKey ?? true,
+		),
+		autoPickBestAccountOnLaunch: normalizeBoolean(
+			value.autoPickBestAccountOnLaunch,
+			DEFAULT_DASHBOARD_DISPLAY_SETTINGS.autoPickBestAccountOnLaunch ?? false,
 		),
 		menuAutoFetchLimits: normalizeBoolean(
 			value.menuAutoFetchLimits,

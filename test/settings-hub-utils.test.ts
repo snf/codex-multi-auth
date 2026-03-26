@@ -709,6 +709,18 @@ describe("settings-hub utility coverage", () => {
 			expect(selected?.actionPauseOnKey).toBe(false);
 		});
 
+		it("toggles auto-pick best account on launch before returning the draft", async () => {
+			const api = await loadSettingsHubTestApi();
+			queueSelectResults(
+				{ type: "toggle-auto-pick-best-account-on-launch" },
+				{ type: "save" },
+			);
+			const selected = await api.promptBehaviorSettings({
+				...DEFAULT_DASHBOARD_DISPLAY_SETTINGS,
+			});
+			expect(selected?.autoPickBestAccountOnLaunch).toBe(true);
+		});
+
 		it("restores theme baseline when the prompt is cancelled", async () => {
 			const api = await loadSettingsHubTestApi();
 			queueSelectResults({ type: "cancel" });

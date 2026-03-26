@@ -192,6 +192,7 @@ vi.mock("../lib/dashboard-settings.js", () => ({
 		showForecastReasons: true,
 		showRecommendations: true,
 		showLiveProbeNotes: true,
+		autoPickBestAccountOnLaunch: false,
 		menuAutoFetchLimits: true,
 		menuSortEnabled: true,
 		menuSortMode: "ready-first",
@@ -4054,6 +4055,74 @@ describe("codex manager cli commands", () => {
 				email: "a@example.com",
 				accessToken: "access-a",
 				refreshToken: "refresh-a",
+			}),
+		);
+	});
+
+	it("autoPickBestAccountOnLaunchIfEnabled skips work when the dashboard toggle is off", async () => {
+		loadDashboardDisplaySettingsMock.mockResolvedValueOnce({
+			autoPickBestAccountOnLaunch: false,
+		});
+
+		const { autoPickBestAccountOnLaunchIfEnabled } = await import(
+			"../lib/codex-manager.js"
+		);
+		const picked = await autoPickBestAccountOnLaunchIfEnabled();
+
+		expect(picked).toBe(false);
+		expect(loadAccountsMock).not.toHaveBeenCalled();
+		expect(queuedRefreshMock).not.toHaveBeenCalled();
+		expect(setCodexCliActiveSelectionMock).not.toHaveBeenCalled();
+	});
+
+	it("autoPickBestAccountOnLaunchIfEnabled reuses auth best --live behavior", async () => {
+		const now = Date.now();
+		loadDashboardDisplaySettingsMock.mockResolvedValueOnce({
+			autoPickBestAccountOnLaunch: true,
+		});
+		loadAccountsMock.mockResolvedValueOnce({
+			version: 3,
+			activeIndex: 0,
+			activeIndexByFamily: { codex: 0 },
+			accounts: [
+				{
+					email: "best@example.com",
+					accountId: "acc_best",
+					refreshToken: "refresh-best",
+					accessToken: "access-best",
+					expiresAt: now - 60_000,
+					addedAt: now - 1_000,
+					lastUsed: now - 1_000,
+					enabled: true,
+				},
+			],
+		});
+		queuedRefreshMock.mockResolvedValueOnce({
+			type: "success",
+			access: "access-best-next",
+			refresh: "refresh-best-next",
+			expires: now + 3_600_000,
+			idToken: "id-best-next",
+		});
+		setCodexCliActiveSelectionMock.mockResolvedValueOnce(true);
+
+		const { autoPickBestAccountOnLaunchIfEnabled } = await import(
+			"../lib/codex-manager.js"
+		);
+		const picked = await autoPickBestAccountOnLaunchIfEnabled();
+
+		expect(picked).toBe(true);
+		expect(queuedRefreshMock).toHaveBeenCalledTimes(1);
+		expect(queuedRefreshMock).toHaveBeenCalledWith("refresh-best");
+		expect(saveAccountsMock).toHaveBeenCalledTimes(1);
+		expect(setCodexCliActiveSelectionMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				accountId: "acc_test",
+				email: "best@example.com",
+				accessToken: "access-best-next",
+				refreshToken: "refresh-best-next",
+				expiresAt: now + 3_600_000,
+				idToken: "id-best-next",
 			}),
 		);
 	});

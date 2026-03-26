@@ -3157,6 +3157,38 @@ export async function autoSyncActiveAccountToCodex(): Promise<boolean> {
 		...(syncIdToken ? { idToken: syncIdToken } : {}),
 	});
 }
+
+export async function autoPickBestAccountOnLaunchIfEnabled(): Promise<boolean> {
+	const displaySettings = await loadDashboardDisplaySettings();
+	if (!(displaySettings.autoPickBestAccountOnLaunch ?? false)) {
+		return false;
+	}
+
+	const exitCode = await runBestCommand(["--live"], {
+		setStoragePath,
+		loadAccounts,
+		saveAccounts,
+		parseBestArgs,
+		printBestUsage,
+		resolveActiveIndex,
+		hasUsableAccessToken,
+		queuedRefresh,
+		normalizeFailureDetail,
+		extractAccountId,
+		extractAccountEmail,
+		sanitizeEmail,
+		formatAccountLabel,
+		fetchCodexQuotaSnapshot,
+		evaluateForecastAccounts,
+		recommendForecastAccount,
+		persistAndSyncSelectedAccount,
+		setCodexCliActiveSelection,
+		logInfo: () => {},
+		logWarn: () => {},
+		logError: () => {},
+	});
+	return exitCode === 0;
+}
 export async function runCodexMultiAuthCli(rawArgs: string[]): Promise<number> {
 	const startupDisplaySettings = await loadDashboardDisplaySettings();
 	applyUiThemeFromDashboardSettings(startupDisplaySettings);

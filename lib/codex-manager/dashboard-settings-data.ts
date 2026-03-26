@@ -23,6 +23,8 @@ export function cloneDashboardSettingsData(
 		showLiveProbeNotes: settings.showLiveProbeNotes,
 		actionAutoReturnMs: settings.actionAutoReturnMs ?? 2_000,
 		actionPauseOnKey: settings.actionPauseOnKey ?? true,
+		autoPickBestAccountOnLaunch:
+			settings.autoPickBestAccountOnLaunch ?? false,
 		menuAutoFetchLimits: settings.menuAutoFetchLimits ?? true,
 		menuSortEnabled:
 			settings.menuSortEnabled ??
@@ -78,6 +80,8 @@ export function dashboardSettingsDataEqual(
 		(left.actionAutoReturnMs ?? 2_000) ===
 			(right.actionAutoReturnMs ?? 2_000) &&
 		(left.actionPauseOnKey ?? true) === (right.actionPauseOnKey ?? true) &&
+		(left.autoPickBestAccountOnLaunch ?? false) ===
+			(right.autoPickBestAccountOnLaunch ?? false) &&
 		(left.menuAutoFetchLimits ?? true) ===
 			(right.menuAutoFetchLimits ?? true) &&
 		(left.menuSortEnabled ??
