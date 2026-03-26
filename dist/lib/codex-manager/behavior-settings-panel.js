@@ -13,7 +13,6 @@ export async function promptBehaviorSettingsPanel(initial, deps) {
     while (true) {
         const currentDelay = draft.actionAutoReturnMs ?? 2_000;
         const pauseOnKey = draft.actionPauseOnKey ?? true;
-        const autoPickBestAccountOnLaunch = draft.autoPickBestAccountOnLaunch ?? false;
         const autoFetchLimits = draft.menuAutoFetchLimits ?? true;
         const fetchStatusVisible = draft.menuShowFetchStatus ?? true;
         const menuQuotaTtlMs = draft.menuQuotaTtlMs ?? 5 * 60_000;
@@ -46,12 +45,6 @@ export async function promptBehaviorSettingsPanel(initial, deps) {
                 hint: "Press any key to stop auto-return.",
                 value: { type: "toggle-pause" },
                 color: pauseColor,
-            },
-            {
-                label: `${autoPickBestAccountOnLaunch ? "[x]" : "[ ]"} Auto-pick best account on codex launch`,
-                hint: "Runs the live best-account check before proxying to the real Codex CLI.",
-                value: { type: "toggle-auto-pick-best-account-on-launch" },
-                color: autoPickBestAccountOnLaunch ? "green" : "yellow",
             },
             {
                 label: `${autoFetchLimits ? "[x]" : "[ ]"} Auto-fetch limits on menu open (5m cache)`,
@@ -121,8 +114,6 @@ export async function promptBehaviorSettingsPanel(initial, deps) {
                     return { type: "reset" };
                 if (lower === "p")
                     return { type: "toggle-pause" };
-                if (lower === "b")
-                    return { type: "toggle-auto-pick-best-account-on-launch" };
                 if (lower === "l")
                     return { type: "toggle-menu-limit-fetch" };
                 if (lower === "f")
@@ -151,14 +142,6 @@ export async function promptBehaviorSettingsPanel(initial, deps) {
         }
         if (result.type === "toggle-pause") {
             draft = { ...draft, actionPauseOnKey: !(draft.actionPauseOnKey ?? true) };
-            focus = result;
-            continue;
-        }
-        if (result.type === "toggle-auto-pick-best-account-on-launch") {
-            draft = {
-                ...draft,
-                autoPickBestAccountOnLaunch: !(draft.autoPickBestAccountOnLaunch ?? false),
-            };
             focus = result;
             continue;
         }

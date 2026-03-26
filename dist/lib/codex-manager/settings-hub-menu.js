@@ -11,6 +11,7 @@ export function buildSettingsHubItems(copy) {
             value: { type: "summary-fields" },
             color: "green",
         },
+        { label: copy.startup, value: { type: "startup" }, color: "green" },
         { label: copy.behavior, value: { type: "behavior" }, color: "green" },
         { label: copy.theme, value: { type: "theme" }, color: "green" },
         { label: "", value: { type: "back" }, separator: true },

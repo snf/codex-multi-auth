@@ -4,6 +4,8 @@ export type SettingsHubMenuAction = {
 } | {
     type: "summary-fields";
 } | {
+    type: "startup";
+} | {
     type: "behavior";
 } | {
     type: "theme";
@@ -18,6 +20,7 @@ export declare function buildSettingsHubItems(copy: {
     sectionTitle: string;
     accountList: string;
     summaryFields: string;
+    startup: string;
     behavior: string;
     theme: string;
     advancedTitle: string;

@@ -1,6 +1,6 @@
 import type { DashboardDisplaySettings } from "../dashboard-settings.js";
 import type { PluginConfig } from "../types.js";
-export type SettingsHubActionType = "account-list" | "summary-fields" | "behavior" | "theme" | "experimental" | "backend" | "back";
+export type SettingsHubActionType = "account-list" | "summary-fields" | "startup" | "behavior" | "theme" | "experimental" | "backend" | "back";
 export type UnifiedSettingsControllerDeps = {
     cloneDashboardSettings: (settings: DashboardDisplaySettings) => DashboardDisplaySettings;
     cloneBackendPluginConfig: (config: PluginConfig) => PluginConfig;
@@ -12,6 +12,7 @@ export type UnifiedSettingsControllerDeps = {
     } | null>;
     configureDashboardDisplaySettings: (current: DashboardDisplaySettings) => Promise<DashboardDisplaySettings>;
     configureStatuslineSettings: (current: DashboardDisplaySettings) => Promise<DashboardDisplaySettings>;
+    promptStartupSettings: (current: DashboardDisplaySettings) => Promise<DashboardDisplaySettings | null>;
     promptBehaviorSettings: (current: DashboardDisplaySettings) => Promise<DashboardDisplaySettings | null>;
     promptThemeSettings: (current: DashboardDisplaySettings) => Promise<DashboardDisplaySettings | null>;
     dashboardSettingsEqual: (left: DashboardDisplaySettings, right: DashboardDisplaySettings) => boolean;
@@ -20,6 +21,7 @@ export type UnifiedSettingsControllerDeps = {
     backendSettingsEqual: (left: PluginConfig, right: PluginConfig) => boolean;
     persistBackendConfigSelection: (config: PluginConfig, scope: string) => Promise<PluginConfig>;
     configureBackendSettings: (config: PluginConfig) => Promise<PluginConfig>;
+    STARTUP_PANEL_KEYS: readonly (keyof DashboardDisplaySettings)[];
     BEHAVIOR_PANEL_KEYS: readonly (keyof DashboardDisplaySettings)[];
     THEME_PANEL_KEYS: readonly (keyof DashboardDisplaySettings)[];
 };

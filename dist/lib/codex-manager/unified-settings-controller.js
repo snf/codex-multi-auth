@@ -17,6 +17,13 @@ export async function configureUnifiedSettingsController(initialSettings, deps) 
             current = await deps.configureStatuslineSettings(current);
             continue;
         }
+        if (action.type === "startup") {
+            const selected = await deps.promptStartupSettings(current);
+            if (selected && !deps.dashboardSettingsEqual(current, selected)) {
+                current = await deps.persistDashboardSettingsSelection(selected, deps.STARTUP_PANEL_KEYS, "startup");
+            }
+            continue;
+        }
         if (action.type === "behavior") {
             const selected = await deps.promptBehaviorSettings(current);
             if (selected && !deps.dashboardSettingsEqual(current, selected)) {

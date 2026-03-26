@@ -59,6 +59,14 @@ export async function promptBehaviorSettingsPanelEntry(params) {
         UI_COPY: params.UI_COPY,
     });
 }
+export async function promptStartupSettingsPanelEntry(params) {
+    return params.promptStartupSettingsPanel(params.initial, {
+        cloneDashboardSettings: params.cloneDashboardSettings,
+        applyDashboardDefaultsForKeys: params.applyDashboardDefaultsForKeys,
+        STARTUP_PANEL_KEYS: params.STARTUP_PANEL_KEYS,
+        UI_COPY: params.UI_COPY,
+    });
+}
 export async function promptThemeSettingsPanelEntry(params) {
     return params.promptThemeSettingsPanel(params.initial, {
         cloneDashboardSettings: params.cloneDashboardSettings,

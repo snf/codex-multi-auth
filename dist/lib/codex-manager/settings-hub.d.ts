@@ -36,12 +36,14 @@ declare const __testOnly: {
     reorderField: typeof reorderStatuslineField;
     promptDashboardDisplaySettings: typeof promptDashboardDisplaySettings;
     promptStatuslineSettings: typeof promptStatuslineSettings;
+    promptStartupSettings: typeof promptStartupSettings;
     promptBehaviorSettings: typeof promptBehaviorSettings;
     promptThemeSettings: typeof promptThemeSettings;
     promptBackendSettings: typeof promptBackendSettings;
 };
 declare function promptDashboardDisplaySettings(initial: DashboardDisplaySettings): Promise<DashboardDisplaySettings | null>;
 declare function promptStatuslineSettings(initial: DashboardDisplaySettings): Promise<DashboardDisplaySettings | null>;
+declare function promptStartupSettings(initial: DashboardDisplaySettings): Promise<DashboardDisplaySettings | null>;
 declare function promptBehaviorSettings(initial: DashboardDisplaySettings): Promise<DashboardDisplaySettings | null>;
 declare function promptThemeSettings(initial: DashboardDisplaySettings): Promise<DashboardDisplaySettings | null>;
 declare function promptBackendSettings(initial: PluginConfig): Promise<PluginConfig | null>;

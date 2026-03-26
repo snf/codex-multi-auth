@@ -1,6 +1,7 @@
 import { type DashboardDisplaySettings, type DashboardStatuslineField } from "../dashboard-settings.js";
 import type { BehaviorSettingsPanelDeps } from "./behavior-settings-panel.js";
 import type { DashboardDisplayPanelDeps } from "./dashboard-display-panel.js";
+import type { StartupSettingsPanelDeps } from "./startup-settings-panel.js";
 import type { StatuslineSettingsPanelDeps } from "./statusline-settings-panel.js";
 import type { ThemeSettingsPanelDeps } from "./theme-settings-panel.js";
 export declare function promptDashboardDisplaySettingsPanelEntry(params: {
@@ -41,6 +42,14 @@ export declare function promptBehaviorSettingsPanelEntry(params: {
     MENU_QUOTA_TTL_OPTIONS_MS: BehaviorSettingsPanelDeps["MENU_QUOTA_TTL_OPTIONS_MS"];
     BEHAVIOR_PANEL_KEYS: BehaviorSettingsPanelDeps["BEHAVIOR_PANEL_KEYS"];
     UI_COPY: BehaviorSettingsPanelDeps["UI_COPY"];
+}): Promise<DashboardDisplaySettings | null>;
+export declare function promptStartupSettingsPanelEntry(params: {
+    initial: DashboardDisplaySettings;
+    promptStartupSettingsPanel: (initial: DashboardDisplaySettings, deps: StartupSettingsPanelDeps) => Promise<DashboardDisplaySettings | null>;
+    cloneDashboardSettings: StartupSettingsPanelDeps["cloneDashboardSettings"];
+    applyDashboardDefaultsForKeys: StartupSettingsPanelDeps["applyDashboardDefaultsForKeys"];
+    STARTUP_PANEL_KEYS: StartupSettingsPanelDeps["STARTUP_PANEL_KEYS"];
+    UI_COPY: StartupSettingsPanelDeps["UI_COPY"];
 }): Promise<DashboardDisplaySettings | null>;
 export declare function promptThemeSettingsPanelEntry(params: {
     initial: DashboardDisplaySettings;

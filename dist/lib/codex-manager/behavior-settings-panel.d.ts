@@ -6,8 +6,6 @@ export type BehaviorConfigAction = {
 } | {
     type: "toggle-pause";
 } | {
-    type: "toggle-auto-pick-best-account-on-launch";
-} | {
     type: "toggle-menu-limit-fetch";
 } | {
     type: "toggle-menu-fetch-status";

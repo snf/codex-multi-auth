@@ -8,6 +8,7 @@ export async function configureUnifiedSettingsEntry(initialSettings, deps) {
         promptSettingsHub: deps.promptSettingsHub,
         configureDashboardDisplaySettings: deps.configureDashboardDisplaySettings,
         configureStatuslineSettings: deps.configureStatuslineSettings,
+        promptStartupSettings: deps.promptStartupSettings,
         promptBehaviorSettings: deps.promptBehaviorSettings,
         promptThemeSettings: deps.promptThemeSettings,
         dashboardSettingsEqual: deps.dashboardSettingsEqual,
@@ -16,6 +17,7 @@ export async function configureUnifiedSettingsEntry(initialSettings, deps) {
         backendSettingsEqual: deps.backendSettingsEqual,
         persistBackendConfigSelection: deps.persistBackendConfigSelection,
         configureBackendSettings: deps.configureBackendSettings,
+        STARTUP_PANEL_KEYS: deps.STARTUP_PANEL_KEYS,
         BEHAVIOR_PANEL_KEYS: deps.BEHAVIOR_PANEL_KEYS,
         THEME_PANEL_KEYS: deps.THEME_PANEL_KEYS,
     });

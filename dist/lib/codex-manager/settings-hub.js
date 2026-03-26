@@ -30,11 +30,12 @@ import { loadExperimentalSyncTargetEntry } from "./experimental-sync-target-entr
 import { promptSettingsHubEntry } from "./settings-hub-entry.js";
 import { buildSettingsHubItems, findSettingsHubInitialCursor, } from "./settings-hub-menu.js";
 import { promptSettingsHubMenu } from "./settings-hub-prompt.js";
-import { promptBehaviorSettingsPanelEntry, promptDashboardDisplaySettingsPanelEntry, promptStatuslineSettingsPanelEntry, promptThemeSettingsPanelEntry, reorderStatuslineField, } from "./settings-panels.js";
+import { promptBehaviorSettingsPanelEntry, promptDashboardDisplaySettingsPanelEntry, promptStatuslineSettingsPanelEntry, promptStartupSettingsPanelEntry, promptThemeSettingsPanelEntry, reorderStatuslineField, } from "./settings-panels.js";
 import { readFileWithRetry, resolvePluginConfigSavePathKey, warnPersistFailure, } from "./settings-persist-utils.js";
 import { buildAccountListPreview as buildAccountListPreviewBase, buildSummaryPreviewText as buildSummaryPreviewTextBase, highlightPreviewToken, normalizeStatuslineFields, } from "./settings-preview.js";
 import { withQueuedRetry } from "./settings-write-queue.js";
 import { promptStatuslineSettingsPanel } from "./statusline-settings-panel.js";
+import { promptStartupSettingsPanel } from "./startup-settings-panel.js";
 import { promptThemeSettingsPanel } from "./theme-settings-panel.js";
 import { configureUnifiedSettingsController, } from "./unified-settings-controller.js";
 import { configureUnifiedSettingsEntry } from "./unified-settings-entry.js";
@@ -134,10 +135,12 @@ const ACCOUNT_LIST_PANEL_KEYS = [
 const STATUSLINE_PANEL_KEYS = [
     "menuStatuslineFields",
 ];
+const STARTUP_PANEL_KEYS = [
+    "autoPickBestAccountOnLaunch",
+];
 const BEHAVIOR_PANEL_KEYS = [
     "actionAutoReturnMs",
     "actionPauseOnKey",
-    "autoPickBestAccountOnLaunch",
     "menuAutoFetchLimits",
     "menuShowFetchStatus",
     "menuQuotaTtlMs",
@@ -263,6 +266,7 @@ const __testOnly = {
     reorderField: reorderStatuslineField,
     promptDashboardDisplaySettings,
     promptStatuslineSettings,
+    promptStartupSettings,
     promptBehaviorSettings,
     promptThemeSettings,
     promptBackendSettings,
@@ -310,6 +314,16 @@ async function promptStatuslineSettings(initial) {
         applyDashboardDefaultsForKeys,
         STATUSLINE_FIELD_OPTIONS,
         STATUSLINE_PANEL_KEYS,
+        UI_COPY,
+    });
+}
+async function promptStartupSettings(initial) {
+    return promptStartupSettingsPanelEntry({
+        initial,
+        promptStartupSettingsPanel,
+        cloneDashboardSettings,
+        applyDashboardDefaultsForKeys,
+        STARTUP_PANEL_KEYS,
         UI_COPY,
     });
 }
@@ -501,6 +515,7 @@ async function configureUnifiedSettings(initialSettings) {
         promptSettingsHub: async (focus) => promptSettingsHub(focus),
         configureDashboardDisplaySettings,
         configureStatuslineSettings,
+        promptStartupSettings,
         promptBehaviorSettings,
         promptThemeSettings,
         dashboardSettingsEqual,
@@ -509,6 +524,7 @@ async function configureUnifiedSettings(initialSettings) {
         backendSettingsEqual,
         persistBackendConfigSelection,
         configureBackendSettings,
+        STARTUP_PANEL_KEYS,
         BEHAVIOR_PANEL_KEYS,
         THEME_PANEL_KEYS,
     });

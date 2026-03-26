@@ -77,13 +77,14 @@ export declare const UI_COPY: {
     };
     readonly settings: {
         readonly title: "Settings";
-        readonly subtitle: "Customize menu, behavior, backend, and experiments";
+        readonly subtitle: "Customize startup, menu, behavior, backend, and experiments";
         readonly help: "↑↓ Move | Enter Select | Q Back";
         readonly sectionTitle: "Basic";
         readonly advancedTitle: "Advanced";
         readonly exitTitle: "Back";
         readonly accountList: "Account List View";
         readonly summaryFields: "Summary Line";
+        readonly startup: "Startup";
         readonly behavior: "Menu Behavior";
         readonly theme: "Color Theme";
         readonly experimental: "Experimental";
@@ -113,9 +114,12 @@ export declare const UI_COPY: {
         readonly summaryTitle: "Account Details Row";
         readonly summarySubtitle: "Choose and order detail fields";
         readonly summaryHelp: "Enter Toggle | 1-3 Toggle | [ ] Reorder | S Save | Q Back (No Save)";
+        readonly startupTitle: "Startup";
+        readonly startupSubtitle: "Control what runs before the Codex CLI starts";
+        readonly startupHelp: "Enter Toggle | 1 Toggle | B BestOnLaunch | S Save | Q Back (No Save)";
         readonly behaviorTitle: "Return Behavior";
         readonly behaviorSubtitle: "Control how result screens return";
-        readonly behaviorHelp: "Enter Select | 1-3 Delay | P Pause | B BestOnLaunch | L AutoFetch | F Status | T TTL | S Save | Q Back (No Save)";
+        readonly behaviorHelp: "Enter Select | 1-3 Delay | P Pause | L AutoFetch | F Status | T TTL | S Save | Q Back (No Save)";
         readonly themeTitle: "Color Theme";
         readonly themeSubtitle: "Pick base color and accent";
         readonly themeHelp: "Enter Select | 1-2 Base | S Save | Q Back (No Save)";
