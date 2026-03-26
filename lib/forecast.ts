@@ -26,6 +26,8 @@ export interface ForecastAccountResult {
 	reasons: string[];
 	hardFailure: boolean;
 	disabled: boolean;
+	remainingPercent5h?: number;
+	remainingPercent7d?: number;
 }
 
 export interface ForecastRecommendation {
@@ -43,6 +45,8 @@ export interface ForecastExplanationAccount {
 	waitMs: number;
 	reasons: string[];
 	selected: boolean;
+	remainingPercent5h?: number;
+	remainingPercent7d?: number;
 }
 
 export interface ForecastExplanation {
@@ -130,14 +134,22 @@ function getRateLimitResetTimeForFamily(
 
 function getLiveQuotaWaitMs(snapshot: CodexQuotaSnapshot, now: number): number {
 	const waits: number[] = [];
-	for (const resetAt of [
-		snapshot.primary.resetAtMs,
-		snapshot.secondary.resetAtMs,
-	]) {
-		if (typeof resetAt !== "number") continue;
-		if (!Number.isFinite(resetAt)) continue;
-		const remaining = resetAt - now;
-		if (remaining > 0) waits.push(remaining);
+	const primaryUsed = snapshot.primary.usedPercent ?? 0;
+	const secondaryUsed = snapshot.secondary.usedPercent ?? 0;
+	const primaryWait = getQuotaResetWaitMs(snapshot.primary.resetAtMs, now);
+	const secondaryWait = getQuotaResetWaitMs(snapshot.secondary.resetAtMs, now);
+
+	if (snapshot.status === 429) {
+		if (primaryWait > 0) waits.push(primaryWait);
+		if (secondaryWait > 0) waits.push(secondaryWait);
+		return waits.length > 0 ? Math.max(...waits) : 0;
+	}
+
+	if (primaryUsed >= 90 && primaryWait > 0) {
+		waits.push(primaryWait);
+	}
+	if (secondaryUsed >= 90 && secondaryWait > 0) {
+		waits.push(secondaryWait);
 	}
 	return waits.length > 0 ? Math.max(...waits) : 0;
 }
@@ -150,6 +162,32 @@ function describeQuotaUsage(
 		return null;
 	const bounded = Math.max(0, Math.min(100, Math.round(usedPercent)));
 	return `${label} quota ${bounded}% used`;
+}
+
+function quotaRemainingPercent(
+	usedPercent: number | undefined,
+): number | undefined {
+	if (typeof usedPercent !== "number" || !Number.isFinite(usedPercent)) {
+		return undefined;
+	}
+	return Math.max(0, Math.min(100, Math.round(100 - usedPercent)));
+}
+
+function getQuotaResetWaitMs(resetAtMs: number | undefined, now: number): number {
+	if (typeof resetAtMs !== "number" || !Number.isFinite(resetAtMs)) {
+		return 0;
+	}
+	return Math.max(0, Math.floor(resetAtMs - now));
+}
+
+function markQuotaUnavailable(
+	currentAvailability: ForecastAvailability,
+	waitMs: number,
+): ForecastAvailability {
+	if (currentAvailability === "unavailable") {
+		return "unavailable";
+	}
+	return waitMs > 0 ? "delayed" : "unavailable";
 }
 
 export function isHardRefreshFailure(failure: TokenFailure): boolean {
@@ -229,6 +267,8 @@ export function evaluateForecastAccount(
 	}
 
 	const quota = input.liveQuota;
+	const remainingPercent5h = quotaRemainingPercent(quota?.primary.usedPercent);
+	const remainingPercent7d = quotaRemainingPercent(quota?.secondary.usedPercent);
 	if (quota) {
 		const primaryUsed = quota.primary.usedPercent ?? 0;
 		const secondaryUsed = quota.secondary.usedPercent ?? 0;
@@ -256,6 +296,29 @@ export function evaluateForecastAccount(
 			quota.secondary.usedPercent,
 		);
 		if (secondaryUsage) reasons.push(secondaryUsage);
+
+		const wait5h = getQuotaResetWaitMs(quota.primary.resetAtMs, now);
+		const wait7d = getQuotaResetWaitMs(quota.secondary.resetAtMs, now);
+		if (typeof remainingPercent7d === "number" && remainingPercent7d <= 0) {
+			waitMs = Math.max(waitMs, wait7d);
+			availability = markQuotaUnavailable(availability, wait7d);
+			reasons.push("7d quota unavailable now");
+			appendWaitReason(reasons, "7d quota resets in", wait7d);
+		} else if (typeof remainingPercent5h === "number" && remainingPercent5h <= 0) {
+			waitMs = Math.max(waitMs, wait5h);
+			availability = markQuotaUnavailable(availability, wait5h);
+			reasons.push("5h quota unavailable now");
+			appendWaitReason(reasons, "5h quota resets in", wait5h);
+		}
+
+		if (typeof remainingPercent7d === "number" && remainingPercent7d < 5) {
+			riskScore += 25;
+			reasons.push(`7d remaining low (${remainingPercent7d}% left)`);
+		}
+		if (typeof remainingPercent5h === "number" && remainingPercent5h < 10) {
+			riskScore += 15;
+			reasons.push(`5h remaining low (${remainingPercent5h}% left)`);
+		}
 
 		if (primaryUsed >= 98 || secondaryUsed >= 98) {
 			riskScore += 55;
@@ -294,6 +357,8 @@ export function evaluateForecastAccount(
 		reasons,
 		hardFailure,
 		disabled,
+		remainingPercent5h,
+		remainingPercent7d,
 	};
 }
 
@@ -322,6 +387,22 @@ function compareForecastResults(
 		a.waitMs !== b.waitMs
 	) {
 		return a.waitMs - b.waitMs;
+	}
+
+	if (
+		a.availability === "ready" &&
+		b.availability === "ready" &&
+		a.remainingPercent7d !== b.remainingPercent7d
+	) {
+		return (b.remainingPercent7d ?? -1) - (a.remainingPercent7d ?? -1);
+	}
+
+	if (
+		a.availability === "ready" &&
+		b.availability === "ready" &&
+		a.remainingPercent5h !== b.remainingPercent5h
+	) {
+		return (b.remainingPercent5h ?? -1) - (a.remainingPercent5h ?? -1);
 	}
 
 	if (a.riskScore !== b.riskScore) {
@@ -403,6 +484,8 @@ export function buildForecastExplanation(
 			waitMs: result.waitMs,
 			reasons: result.reasons,
 			selected: recommendation.recommendedIndex === result.index,
+			remainingPercent5h: result.remainingPercent5h,
+			remainingPercent7d: result.remainingPercent7d,
 		})),
 	};
 }

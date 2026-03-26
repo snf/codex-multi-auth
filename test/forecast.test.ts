@@ -264,6 +264,74 @@ describe("forecast helpers", () => {
 		expect(result.waitMs).toBe(0);
 	});
 
+	it("treats an account as not usable now when 7d quota is exhausted even if 5h remains", () => {
+		const now = 1_700_000_000_000;
+		const result = evaluateForecastAccount({
+			index: 2,
+			now,
+			isCurrent: false,
+			account: {
+				refreshToken: "refresh-3",
+				addedAt: now - 10_000,
+				lastUsed: now - 10_000,
+			},
+			liveQuota: {
+				status: 200,
+				model: "gpt-5-codex",
+				primary: {
+					usedPercent: 10,
+					windowMinutes: 300,
+					resetAtMs: now + 120_000,
+				},
+				secondary: {
+					usedPercent: 100,
+					windowMinutes: 10080,
+					resetAtMs: now + 180_000,
+				},
+			},
+		});
+
+		expect(result.availability).toBe("delayed");
+		expect(result.waitMs).toBe(180_000);
+		expect(
+			result.reasons.some((reason) => reason.includes("7d quota unavailable now")),
+		).toBe(true);
+	});
+
+	it("treats an account as delayed when 7d is available but 5h quota is exhausted", () => {
+		const now = 1_700_000_000_000;
+		const result = evaluateForecastAccount({
+			index: 2,
+			now,
+			isCurrent: false,
+			account: {
+				refreshToken: "refresh-3",
+				addedAt: now - 10_000,
+				lastUsed: now - 10_000,
+			},
+			liveQuota: {
+				status: 200,
+				model: "gpt-5-codex",
+				primary: {
+					usedPercent: 100,
+					windowMinutes: 300,
+					resetAtMs: now + 120_000,
+				},
+				secondary: {
+					usedPercent: 20,
+					windowMinutes: 10080,
+					resetAtMs: now + 180_000,
+				},
+			},
+		});
+
+		expect(result.availability).toBe("delayed");
+		expect(result.waitMs).toBe(120_000);
+		expect(
+			result.reasons.some((reason) => reason.includes("5h quota unavailable now")),
+		).toBe(true);
+	});
+
 	it("prefers refresh failure reason code over raw message text", () => {
 		const now = 1_700_000_000_000;
 		const result = evaluateForecastAccount({
@@ -357,6 +425,67 @@ describe("forecast helpers", () => {
 		expect(scoreAt80).toBeGreaterThan(scoreAt70);
 		expect(scoreAt90).toBeGreaterThan(scoreAt80);
 		expect(scoreAt98).toBeGreaterThan(scoreAt90);
+	});
+
+	it("penalizes low remaining 7d and 5h headroom", () => {
+		const now = 1_700_000_000_000;
+		const healthy = evaluateForecastAccount({
+			index: 0,
+			now,
+			isCurrent: false,
+			account: {
+				refreshToken: "healthy",
+				addedAt: now - 1_000,
+				lastUsed: now - 1_000,
+			},
+			liveQuota: {
+				status: 200,
+				model: "gpt-5-codex",
+				primary: { usedPercent: 50, windowMinutes: 300 },
+				secondary: { usedPercent: 50, windowMinutes: 10080 },
+			},
+		});
+		const low7d = evaluateForecastAccount({
+			index: 1,
+			now,
+			isCurrent: false,
+			account: {
+				refreshToken: "low7d",
+				addedAt: now - 1_000,
+				lastUsed: now - 1_000,
+			},
+			liveQuota: {
+				status: 200,
+				model: "gpt-5-codex",
+				primary: { usedPercent: 50, windowMinutes: 300 },
+				secondary: { usedPercent: 96, windowMinutes: 10080 },
+			},
+		});
+		const low5h = evaluateForecastAccount({
+			index: 2,
+			now,
+			isCurrent: false,
+			account: {
+				refreshToken: "low5h",
+				addedAt: now - 1_000,
+				lastUsed: now - 1_000,
+			},
+			liveQuota: {
+				status: 200,
+				model: "gpt-5-codex",
+				primary: { usedPercent: 91, windowMinutes: 300 },
+				secondary: { usedPercent: 50, windowMinutes: 10080 },
+			},
+		});
+
+		expect(low7d.riskScore).toBeGreaterThan(healthy.riskScore);
+		expect(low5h.riskScore).toBeGreaterThan(healthy.riskScore);
+		expect(
+			low7d.reasons.some((reason) => reason.includes("7d remaining low")),
+		).toBe(true);
+		expect(
+			low5h.reasons.some((reason) => reason.includes("5h remaining low")),
+		).toBe(true);
 	});
 
 	it("adds stale-age risk penalties for invalid and old usage timestamps", () => {
@@ -543,6 +672,63 @@ describe("forecast helpers", () => {
 
 		const recommendation = recommendForecastAccount(results);
 		expect(recommendation.recommendedIndex).toBe(3);
+	});
+
+	it("prefers ready accounts with more 7d headroom before 5h headroom", () => {
+		const now = 1_700_000_000_000;
+		const results = evaluateForecastAccounts([
+			{
+				index: 0,
+				now,
+				isCurrent: false,
+				account: {
+					refreshToken: "a",
+					addedAt: now - 1_000,
+					lastUsed: now - 1_000,
+				},
+				liveQuota: {
+					status: 200,
+					model: "gpt-5-codex",
+					primary: { usedPercent: 1, windowMinutes: 300 },
+					secondary: { usedPercent: 50, windowMinutes: 10080 },
+				},
+			},
+			{
+				index: 1,
+				now,
+				isCurrent: false,
+				account: {
+					refreshToken: "b",
+					addedAt: now - 1_000,
+					lastUsed: now - 1_000,
+				},
+				liveQuota: {
+					status: 200,
+					model: "gpt-5-codex",
+					primary: { usedPercent: 20, windowMinutes: 300 },
+					secondary: { usedPercent: 10, windowMinutes: 10080 },
+				},
+			},
+			{
+				index: 2,
+				now,
+				isCurrent: false,
+				account: {
+					refreshToken: "c",
+					addedAt: now - 1_000,
+					lastUsed: now - 1_000,
+				},
+				liveQuota: {
+					status: 200,
+					model: "gpt-5-codex",
+					primary: { usedPercent: 40, windowMinutes: 300 },
+					secondary: { usedPercent: 10, windowMinutes: 10080 },
+				},
+			},
+		]);
+
+		const recommendation = recommendForecastAccount(results);
+		expect(recommendation.recommendedIndex).toBe(1);
 	});
 
 	it("returns null recommendation when all candidates are disabled or hard-failed", () => {
