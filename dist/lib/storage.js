@@ -1,0 +1,1442 @@
+import { existsSync, promises as fs } from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { ACCOUNT_LIMITS } from "./constants.js";
+import { StorageError } from "./errors.js";
+import { createLogger } from "./logger.js";
+import { exportNamedBackupFile, getNamedBackupRoot, resolveNamedBackupPath, } from "./named-backup-export.js";
+import { MODEL_FAMILIES } from "./prompts/codex.js";
+import { clearAccountStorageArtifacts } from "./storage/account-clear.js";
+import { clearAccountsEntry } from "./storage/account-clear-entry.js";
+import { collectDistinctIdentityValues, findNewestMatchingIndex as findNewestMatchingIndexByRef, selectNewestAccount, } from "./storage/account-match-utils.js";
+import { cloneAccountStorageForPersistence } from "./storage/account-persistence.js";
+import { describeAccountSnapshot as describeAccountSnapshotWithDeps, statSnapshot as statSnapshotWithDeps, } from "./storage/account-snapshot.js";
+import { exportAccountsSnapshot, importAccountsSnapshot, } from "./storage/account-port.js";
+import { saveAccountsToDisk } from "./storage/account-save.js";
+import { saveAccountsEntry } from "./storage/account-save-entry.js";
+import { buildBackupMetadata } from "./storage/backup-metadata-builder.js";
+import { buildMetadataSection, } from "./storage/backup-metadata.js";
+import { isCacheLikeBackupArtifactName } from "./storage/cache-artifacts.js";
+import { ACCOUNTS_BACKUP_SUFFIX, ACCOUNTS_WAL_SUFFIX, getAccountsBackupPath, getAccountsBackupRecoveryCandidates, getAccountsWalPath, getIntentionalResetMarkerPath, RESET_MARKER_SUFFIX, } from "./storage/backup-paths.js";
+import { restoreAccountsFromBackupPath } from "./storage/backup-restore.js";
+import { looksLikeSyntheticFixtureStorage } from "./storage/fixture-guards.js";
+import { loadFlaggedAccountsFromFile } from "./storage/flagged-storage-file.js";
+import { clearFlaggedAccountsEntry } from "./storage/flagged-entry.js";
+import { loadFlaggedAccountsEntry } from "./storage/flagged-load-entry.js";
+import { saveFlaggedAccountsEntry } from "./storage/flagged-save-entry.js";
+import { normalizeFlaggedStorage } from "./storage/flagged-storage.js";
+import { clearFlaggedAccountsOnDisk, loadFlaggedAccountsState, saveFlaggedAccountsUnlockedToDisk, } from "./storage/flagged-storage-io.js";
+import { computeSha256 } from "./storage/hash.js";
+import { ensureCodexGitignoreEntry } from "./storage/gitignore.js";
+import { exportAccountsToFile, mergeImportedAccounts, readImportFile, } from "./storage/import-export.js";
+import { formatStorageErrorHint } from "./storage/error-hints.js";
+export { StorageError } from "./errors.js";
+export { formatStorageErrorHint, toStorageError } from "./storage/error-hints.js";
+export { getAccountIdentityKey, normalizeEmailKey, } from "./storage/identity.js";
+import { toAccountIdentityRef, } from "./storage/identity.js";
+import { getFlaggedAccountsPath as buildFlaggedAccountsPath, getLegacyFlaggedAccountsPath as buildLegacyFlaggedAccountsPath, } from "./storage/file-paths.js";
+import { migrateV1ToV3, } from "./storage/migrations.js";
+import { exportNamedBackupEntry } from "./storage/named-backup-entry.js";
+import { collectNamedBackups, } from "./storage/named-backups.js";
+import { getNamedBackupsEntry } from "./storage/named-backups-entry.js";
+import { getStoragePathState, setStoragePathState, } from "./storage/path-state.js";
+import { findProjectRoot, getConfigDir, getProjectConfigDir, getProjectGlobalConfigDir, resolvePath, resolveProjectStorageIdentityRoot, } from "./storage/paths.js";
+import { loadNormalizedStorageFromPath, mergeStorageForMigration, } from "./storage/project-migration.js";
+import { clampIndex, isRecord } from "./storage/record-utils.js";
+import { buildRestoreAssessment } from "./storage/restore-assessment.js";
+import { restoreAccountsFromBackupEntry } from "./storage/restore-backup-entry.js";
+import { createEmptyStorageWithRestoreMetadata as createEmptyStorageWithMetadata, withRestoreMetadata, } from "./storage/restore-metadata.js";
+import { loadAccountsFromPath, parseAndNormalizeStorage, } from "./storage/storage-parser.js";
+import { getTransactionSnapshotState, runInTransactionSnapshotContext, withAccountStorageTransaction as runWithAccountStorageTransaction, withStorageLock, } from "./storage/transactions.js";
+const log = createLogger("storage");
+const ACCOUNTS_FILE_NAME = "openai-codex-accounts.json";
+const FLAGGED_ACCOUNTS_FILE_NAME = "openai-codex-flagged-accounts.json";
+const LEGACY_FLAGGED_ACCOUNTS_FILE_NAME = "openai-codex-blocked-accounts.json";
+const ACCOUNTS_BACKUP_HISTORY_DEPTH = 3;
+const BACKUP_COPY_MAX_ATTEMPTS = 5;
+const BACKUP_COPY_BASE_DELAY_MS = 10;
+let storageBackupEnabled = true;
+let lastAccountsSaveTimestamp = 0;
+async function ensureGitignore(storagePath) {
+    const state = getStoragePathState();
+    if (!state.currentStoragePath)
+        return;
+    await ensureCodexGitignoreEntry({
+        storagePath,
+        currentProjectRoot: state.currentProjectRoot,
+        logDebug: (message, details) => {
+            log.debug(message, details);
+        },
+        logWarn: (message, details) => {
+            log.warn(message, details);
+        },
+    });
+}
+export function setStorageBackupEnabled(enabled) {
+    storageBackupEnabled = enabled;
+}
+async function getAccountsBackupRecoveryCandidatesWithDiscovery(path) {
+    const knownCandidates = getAccountsBackupRecoveryCandidates(path, ACCOUNTS_BACKUP_HISTORY_DEPTH);
+    const discoveredCandidates = new Set();
+    const candidatePrefix = `${basename(path)}.`;
+    const knownCandidateSet = new Set(knownCandidates);
+    const directoryPath = dirname(path);
+    try {
+        const entries = await fs.readdir(directoryPath, { withFileTypes: true });
+        for (const entry of entries) {
+            if (!entry.isFile())
+                continue;
+            if (!entry.name.startsWith(candidatePrefix))
+                continue;
+            if (isCacheLikeBackupArtifactName(entry.name))
+                continue;
+            if (entry.name.endsWith(RESET_MARKER_SUFFIX))
+                continue;
+            if (entry.name.endsWith(".tmp"))
+                continue;
+            if (entry.name.includes(".rotate."))
+                continue;
+            if (entry.name.endsWith(ACCOUNTS_WAL_SUFFIX))
+                continue;
+            const candidatePath = join(directoryPath, entry.name);
+            if (knownCandidateSet.has(candidatePath))
+                continue;
+            discoveredCandidates.add(candidatePath);
+        }
+    }
+    catch (error) {
+        const code = error.code;
+        if (code !== "ENOENT") {
+            log.warn("Failed to discover account backup candidates", {
+                path,
+                error: String(error),
+            });
+        }
+    }
+    const discoveredOrdered = Array.from(discoveredCandidates).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+    return [...knownCandidates, ...discoveredOrdered];
+}
+async function copyFileWithRetry(sourcePath, destinationPath, options) {
+    const allowMissingSource = options?.allowMissingSource ?? false;
+    for (let attempt = 0; attempt < BACKUP_COPY_MAX_ATTEMPTS; attempt += 1) {
+        try {
+            await fs.copyFile(sourcePath, destinationPath);
+            return;
+        }
+        catch (error) {
+            const code = error.code;
+            if (allowMissingSource && code === "ENOENT") {
+                return;
+            }
+            const canRetry = (code === "EPERM" || code === "EBUSY") &&
+                attempt + 1 < BACKUP_COPY_MAX_ATTEMPTS;
+            if (canRetry) {
+                await new Promise((resolve) => setTimeout(resolve, BACKUP_COPY_BASE_DELAY_MS * 2 ** attempt));
+                continue;
+            }
+            throw error;
+        }
+    }
+}
+async function renameFileWithRetry(sourcePath, destinationPath) {
+    for (let attempt = 0; attempt < BACKUP_COPY_MAX_ATTEMPTS; attempt += 1) {
+        try {
+            await fs.rename(sourcePath, destinationPath);
+            return;
+        }
+        catch (error) {
+            const code = error.code;
+            const canRetry = (code === "EPERM" || code === "EBUSY" || code === "EAGAIN") &&
+                attempt + 1 < BACKUP_COPY_MAX_ATTEMPTS;
+            if (!canRetry) {
+                throw error;
+            }
+            const jitterMs = Math.floor(Math.random() * BACKUP_COPY_BASE_DELAY_MS);
+            await new Promise((resolve) => setTimeout(resolve, BACKUP_COPY_BASE_DELAY_MS * 2 ** attempt + jitterMs));
+        }
+    }
+}
+async function createRotatingAccountsBackup(path) {
+    const candidates = getAccountsBackupRecoveryCandidates(path, ACCOUNTS_BACKUP_HISTORY_DEPTH);
+    const rotationNonce = `${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
+    const stagedWrites = [];
+    const buildStagedPath = (targetPath, label) => `${targetPath}.rotate.${rotationNonce}.${label}.tmp`;
+    try {
+        for (let i = candidates.length - 1; i > 0; i -= 1) {
+            const previousPath = candidates[i - 1];
+            const currentPath = candidates[i];
+            if (!previousPath || !currentPath || !existsSync(previousPath)) {
+                continue;
+            }
+            const stagedPath = buildStagedPath(currentPath, `slot-${i}`);
+            await copyFileWithRetry(previousPath, stagedPath, {
+                allowMissingSource: true,
+            });
+            if (existsSync(stagedPath)) {
+                stagedWrites.push({ targetPath: currentPath, stagedPath });
+            }
+        }
+        const latestBackupPath = candidates[0];
+        if (!latestBackupPath) {
+            return;
+        }
+        const latestStagedPath = buildStagedPath(latestBackupPath, "latest");
+        await copyFileWithRetry(path, latestStagedPath);
+        if (existsSync(latestStagedPath)) {
+            stagedWrites.push({
+                targetPath: latestBackupPath,
+                stagedPath: latestStagedPath,
+            });
+        }
+        for (const stagedWrite of stagedWrites) {
+            await renameFileWithRetry(stagedWrite.stagedPath, stagedWrite.targetPath);
+        }
+    }
+    finally {
+        for (const stagedWrite of stagedWrites) {
+            if (!existsSync(stagedWrite.stagedPath)) {
+                continue;
+            }
+            try {
+                await fs.unlink(stagedWrite.stagedPath);
+            }
+            catch {
+                // Best effort cleanup for staged rotation artifacts.
+            }
+        }
+    }
+}
+function isRotatingBackupTempArtifact(storagePath, candidatePath) {
+    const backupPrefix = `${storagePath}${ACCOUNTS_BACKUP_SUFFIX}`;
+    if (!candidatePath.startsWith(backupPrefix) ||
+        !candidatePath.endsWith(".tmp")) {
+        return false;
+    }
+    const suffix = candidatePath.slice(backupPrefix.length);
+    const rotateSeparatorIndex = suffix.indexOf(".rotate.");
+    if (rotateSeparatorIndex === -1) {
+        return false;
+    }
+    const backupIndexSuffix = suffix.slice(0, rotateSeparatorIndex);
+    if (backupIndexSuffix.length > 0 && !/^\.\d+$/.test(backupIndexSuffix)) {
+        return false;
+    }
+    return true;
+}
+async function cleanupStaleRotatingBackupArtifacts(path) {
+    const directoryPath = dirname(path);
+    try {
+        const directoryEntries = await fs.readdir(directoryPath, {
+            withFileTypes: true,
+        });
+        const staleArtifacts = directoryEntries
+            .filter((entry) => entry.isFile())
+            .map((entry) => join(directoryPath, entry.name))
+            .filter((entryPath) => isRotatingBackupTempArtifact(path, entryPath));
+        for (const staleArtifactPath of staleArtifacts) {
+            try {
+                await fs.unlink(staleArtifactPath);
+            }
+            catch (error) {
+                const code = error.code;
+                if (code !== "ENOENT") {
+                    log.warn("Failed to remove stale rotating backup artifact", {
+                        path: staleArtifactPath,
+                        error: String(error),
+                    });
+                }
+            }
+        }
+    }
+    catch (error) {
+        const code = error.code;
+        if (code !== "ENOENT") {
+            log.warn("Failed to scan for stale rotating backup artifacts", {
+                path,
+                error: String(error),
+            });
+        }
+    }
+}
+async function statSnapshot(path) {
+    return statSnapshotWithDeps(path, {
+        stat: fs.stat,
+        logWarn: (message, meta) => log.warn(message, meta),
+    });
+}
+async function describeAccountSnapshot(path, kind, index) {
+    return describeAccountSnapshotWithDeps(path, kind, {
+        index,
+        statSnapshot,
+        loadAccountsFromPath: (targetPath) => loadAccountsFromPath(targetPath, {
+            normalizeAccountStorage,
+            isRecord,
+        }),
+        logWarn: (message, meta) => log.warn(message, meta),
+    });
+}
+async function describeAccountsWalSnapshot(path) {
+    const stats = await statSnapshot(path);
+    if (!stats.exists) {
+        return { kind: "accounts-wal", path, exists: false, valid: false };
+    }
+    try {
+        const raw = await fs.readFile(path, "utf-8");
+        const parsed = JSON.parse(raw);
+        if (!isRecord(parsed)) {
+            return {
+                kind: "accounts-wal",
+                path,
+                exists: true,
+                valid: false,
+                bytes: stats.bytes,
+                mtimeMs: stats.mtimeMs,
+            };
+        }
+        const entry = parsed;
+        if (entry.version !== 1 ||
+            typeof entry.content !== "string" ||
+            typeof entry.checksum !== "string" ||
+            computeSha256(entry.content) !== entry.checksum) {
+            return {
+                kind: "accounts-wal",
+                path,
+                exists: true,
+                valid: false,
+                bytes: stats.bytes,
+                mtimeMs: stats.mtimeMs,
+            };
+        }
+        const { normalized, storedVersion, schemaErrors } = parseAndNormalizeStorage(JSON.parse(entry.content), normalizeAccountStorage, isRecord);
+        return {
+            kind: "accounts-wal",
+            path,
+            exists: true,
+            valid: !!normalized,
+            bytes: stats.bytes,
+            mtimeMs: stats.mtimeMs,
+            version: typeof storedVersion === "number" ? storedVersion : undefined,
+            accountCount: normalized?.accounts.length,
+            schemaErrors: schemaErrors.length > 0 ? schemaErrors : undefined,
+        };
+    }
+    catch {
+        return {
+            kind: "accounts-wal",
+            path,
+            exists: true,
+            valid: false,
+            bytes: stats.bytes,
+            mtimeMs: stats.mtimeMs,
+        };
+    }
+}
+async function loadFlaggedAccountsFromPath(path) {
+    return loadFlaggedAccountsFromFile(path, {
+        readFile: fs.readFile,
+        normalizeFlaggedStorage: (data) => normalizeFlaggedStorage(data, {
+            isRecord,
+            now: () => Date.now(),
+        }),
+    });
+}
+async function describeFlaggedSnapshot(path, kind, index) {
+    const stats = await statSnapshot(path);
+    if (!stats.exists) {
+        return { kind, path, index, exists: false, valid: false };
+    }
+    try {
+        const storage = await loadFlaggedAccountsFromPath(path);
+        return {
+            kind,
+            path,
+            index,
+            exists: true,
+            valid: true,
+            bytes: stats.bytes,
+            mtimeMs: stats.mtimeMs,
+            version: storage.version,
+            flaggedCount: storage.accounts.length,
+        };
+    }
+    catch (error) {
+        const code = error.code;
+        if (code !== "ENOENT") {
+            log.warn("Failed to inspect flagged snapshot", {
+                path,
+                error: String(error),
+            });
+        }
+        return {
+            kind,
+            path,
+            index,
+            exists: true,
+            valid: false,
+            bytes: stats.bytes,
+            mtimeMs: stats.mtimeMs,
+        };
+    }
+}
+export function getLastAccountsSaveTimestamp() {
+    return lastAccountsSaveTimestamp;
+}
+export function setStoragePath(projectPath) {
+    if (!projectPath) {
+        setStoragePathState({
+            currentStoragePath: null,
+            currentLegacyProjectStoragePath: null,
+            currentLegacyWorktreeStoragePath: null,
+            currentProjectRoot: null,
+        });
+        return;
+    }
+    const projectRoot = findProjectRoot(projectPath);
+    if (projectRoot) {
+        const identityRoot = resolveProjectStorageIdentityRoot(projectRoot);
+        const currentStoragePath = join(getProjectGlobalConfigDir(identityRoot), ACCOUNTS_FILE_NAME);
+        const currentLegacyProjectStoragePath = join(getProjectConfigDir(projectRoot), ACCOUNTS_FILE_NAME);
+        const previousWorktreeScopedPath = join(getProjectGlobalConfigDir(projectRoot), ACCOUNTS_FILE_NAME);
+        const currentLegacyWorktreeStoragePath = previousWorktreeScopedPath !== currentStoragePath
+            ? previousWorktreeScopedPath
+            : null;
+        setStoragePathState({
+            currentStoragePath,
+            currentLegacyProjectStoragePath,
+            currentLegacyWorktreeStoragePath,
+            currentProjectRoot: projectRoot,
+        });
+    }
+    else {
+        setStoragePathState({
+            currentStoragePath: null,
+            currentLegacyProjectStoragePath: null,
+            currentLegacyWorktreeStoragePath: null,
+            currentProjectRoot: null,
+        });
+    }
+}
+export function setStoragePathDirect(path) {
+    setStoragePathState({
+        currentStoragePath: path,
+        currentLegacyProjectStoragePath: null,
+        currentLegacyWorktreeStoragePath: null,
+        currentProjectRoot: null,
+    });
+}
+/**
+ * Returns the file path for the account storage JSON file.
+ * @returns Absolute path to the accounts.json file
+ */
+export function getStoragePath() {
+    const state = getStoragePathState();
+    if (state.currentStoragePath) {
+        return state.currentStoragePath;
+    }
+    return join(getConfigDir(), ACCOUNTS_FILE_NAME);
+}
+export function buildNamedBackupPath(name) {
+    return resolveNamedBackupPath(name, getStoragePath());
+}
+export async function getNamedBackups() {
+    return getNamedBackupsEntry({
+        getStoragePath,
+        collectNamedBackups,
+        loadAccountsFromPath: (path) => loadAccountsFromPath(path, {
+            normalizeAccountStorage,
+            isRecord,
+        }),
+        logDebug: (message, details) => {
+            log.debug(message, details);
+        },
+    });
+}
+export async function restoreAccountsFromBackup(path, options) {
+    return restoreAccountsFromBackupEntry({
+        path,
+        options,
+        restoreAccountsFromBackupPath,
+        getNamedBackupRoot,
+        getStoragePath,
+        realpath: fs.realpath,
+        loadAccountsFromPath: (path) => loadAccountsFromPath(path, {
+            normalizeAccountStorage,
+            isRecord,
+        }),
+        saveAccounts,
+    });
+}
+export async function exportNamedBackup(name, options) {
+    return exportNamedBackupEntry({
+        name,
+        options,
+        exportNamedBackupFile,
+        getStoragePath,
+        exportAccounts,
+    });
+}
+export function getFlaggedAccountsPath() {
+    return buildFlaggedAccountsPath(getStoragePath(), FLAGGED_ACCOUNTS_FILE_NAME);
+}
+function getLegacyFlaggedAccountsPath() {
+    return buildLegacyFlaggedAccountsPath(getStoragePath(), LEGACY_FLAGGED_ACCOUNTS_FILE_NAME);
+}
+async function migrateLegacyProjectStorageIfNeeded(options) {
+    const persist = options?.persist ?? saveAccounts;
+    const commit = options?.commit ?? true;
+    const state = getStoragePathState();
+    if (!state.currentStoragePath) {
+        return null;
+    }
+    const currentStoragePath = state.currentStoragePath;
+    const candidatePaths = [
+        state.currentLegacyWorktreeStoragePath,
+        state.currentLegacyProjectStoragePath,
+    ]
+        .filter((path) => typeof path === "string" &&
+        path.length > 0 &&
+        path !== state.currentStoragePath)
+        .filter((path, index, all) => all.indexOf(path) === index);
+    if (candidatePaths.length === 0) {
+        return null;
+    }
+    const existingCandidatePaths = candidatePaths.filter((legacyPath) => existsSync(legacyPath));
+    if (existingCandidatePaths.length === 0) {
+        return null;
+    }
+    const loadCurrentStorageForMigration = async () => loadNormalizedStorageFromPath(currentStoragePath, "current account storage", {
+        loadAccountsFromPath: (path) => loadAccountsFromPath(path, {
+            normalizeAccountStorage,
+            isRecord,
+        }),
+        logWarn: (message, details) => {
+            log.warn(message, details);
+        },
+    });
+    const readLiveCurrentStorageIfExportMode = async () => {
+        if (commit || !existsSync(currentStoragePath)) {
+            return { exists: false, storage: null };
+        }
+        try {
+            const { normalized, schemaErrors } = await loadAccountsFromPath(currentStoragePath, {
+                normalizeAccountStorage,
+                isRecord,
+            });
+            if (schemaErrors.length > 0) {
+                log.warn("current account storage schema validation warnings", {
+                    path: currentStoragePath,
+                    errors: schemaErrors.slice(0, 5),
+                });
+            }
+            return {
+                exists: true,
+                storage: normalized,
+            };
+        }
+        catch (error) {
+            if (error.code === "ENOENT") {
+                return { exists: false, storage: null };
+            }
+            throw error;
+        }
+    };
+    let targetStorage = await loadCurrentStorageForMigration();
+    let migrated = false;
+    for (const legacyPath of existingCandidatePaths) {
+        const liveCurrentStorageBeforeMerge = await readLiveCurrentStorageIfExportMode();
+        if (liveCurrentStorageBeforeMerge.exists) {
+            return liveCurrentStorageBeforeMerge.storage;
+        }
+        const legacyStorage = await loadNormalizedStorageFromPath(legacyPath, "legacy account storage", {
+            loadAccountsFromPath: (path) => loadAccountsFromPath(path, {
+                normalizeAccountStorage,
+                isRecord,
+            }),
+            logWarn: (message, details) => {
+                log.warn(message, details);
+            },
+        });
+        if (!legacyStorage) {
+            continue;
+        }
+        const liveCurrentStorageAfterLegacyRead = await readLiveCurrentStorageIfExportMode();
+        if (liveCurrentStorageAfterLegacyRead.exists) {
+            return liveCurrentStorageAfterLegacyRead.storage;
+        }
+        const mergedStorage = mergeStorageForMigration(targetStorage, legacyStorage, normalizeAccountStorage);
+        const fallbackStorage = targetStorage ?? legacyStorage;
+        if (commit) {
+            try {
+                await persist(mergedStorage);
+                targetStorage = mergedStorage;
+                migrated = true;
+            }
+            catch (error) {
+                targetStorage = fallbackStorage;
+                log.warn("Failed to persist migrated account storage", {
+                    from: legacyPath,
+                    to: currentStoragePath,
+                    error: String(error),
+                });
+                continue;
+            }
+            try {
+                await fs.unlink(legacyPath);
+                log.info("Removed legacy account storage file after migration", {
+                    path: legacyPath,
+                });
+            }
+            catch (unlinkError) {
+                const code = unlinkError.code;
+                if (code !== "ENOENT") {
+                    log.warn("Failed to remove legacy account storage file after migration", {
+                        path: legacyPath,
+                        error: String(unlinkError),
+                    });
+                }
+            }
+            log.info("Migrated legacy project account storage", {
+                from: legacyPath,
+                to: currentStoragePath,
+                accounts: mergedStorage.accounts.length,
+            });
+            continue;
+        }
+        targetStorage = mergedStorage;
+        migrated = true;
+    }
+    if (migrated) {
+        return targetStorage;
+    }
+    if (targetStorage && !existsSync(currentStoragePath)) {
+        return targetStorage;
+    }
+    return null;
+}
+function findNewestMatchingIndex(accounts, predicate) {
+    return findNewestMatchingIndexByRef(accounts, (account) => toAccountIdentityRef(account), predicate, selectNewestAccount);
+}
+function findCompositeAccountMatchIndex(accounts, candidateRef) {
+    if (!candidateRef.accountId || !candidateRef.emailKey)
+        return undefined;
+    return findNewestMatchingIndex(accounts, (ref) => ref.accountId === candidateRef.accountId &&
+        ref.emailKey === candidateRef.emailKey);
+}
+function findSafeEmailMatchIndex(accounts, candidateRef) {
+    if (!candidateRef.emailKey)
+        return undefined;
+    const emailAccountIds = [candidateRef.accountId];
+    let foundAny = false;
+    for (let i = 0; i < accounts.length; i += 1) {
+        const account = accounts[i];
+        if (!account)
+            continue;
+        const ref = toAccountIdentityRef(account);
+        if (ref.emailKey !== candidateRef.emailKey)
+            continue;
+        foundAny = true;
+        emailAccountIds.push(ref.accountId);
+    }
+    if (!foundAny)
+        return undefined;
+    if (collectDistinctIdentityValues(emailAccountIds).size > 1) {
+        return undefined;
+    }
+    return findNewestMatchingIndex(accounts, (ref) => ref.emailKey === candidateRef.emailKey);
+}
+function findCompatibleRefreshTokenMatchIndex(accounts, candidateRef) {
+    if (!candidateRef.refreshToken)
+        return undefined;
+    let matchingIndex;
+    let matchingAccount = null;
+    for (let i = 0; i < accounts.length; i += 1) {
+        const account = accounts[i];
+        if (!account)
+            continue;
+        const ref = toAccountIdentityRef(account);
+        if (ref.refreshToken !== candidateRef.refreshToken)
+            continue;
+        if ((candidateRef.accountId &&
+            ref.accountId &&
+            ref.accountId !== candidateRef.accountId) ||
+            (candidateRef.emailKey &&
+                ref.emailKey &&
+                ref.emailKey !== candidateRef.emailKey)) {
+            return undefined;
+        }
+        if (matchingIndex !== undefined &&
+            !candidateRef.accountId &&
+            !candidateRef.emailKey) {
+            return undefined;
+        }
+        if (matchingIndex === undefined || matchingAccount === null) {
+            matchingIndex = i;
+            matchingAccount = account;
+            continue;
+        }
+        const newest = selectNewestAccount(matchingAccount ?? undefined, account);
+        if (newest === account) {
+            matchingIndex = i;
+            matchingAccount = account;
+        }
+    }
+    return matchingIndex;
+}
+function findUniqueAccountIdMatchIndex(accounts, candidateRef, options) {
+    if (!candidateRef.accountId)
+        return undefined;
+    if (!candidateRef.emailKey &&
+        !options.allowUniqueAccountIdFallbackWithoutEmail) {
+        return undefined;
+    }
+    let matchingIndex;
+    let matchingEmailKey;
+    for (let i = 0; i < accounts.length; i += 1) {
+        const account = accounts[i];
+        if (!account)
+            continue;
+        const ref = toAccountIdentityRef(account);
+        if (ref.accountId !== candidateRef.accountId)
+            continue;
+        if (matchingIndex !== undefined) {
+            return undefined;
+        }
+        matchingIndex = i;
+        matchingEmailKey = ref.emailKey;
+    }
+    if (matchingIndex !== undefined &&
+        matchingEmailKey &&
+        candidateRef.emailKey &&
+        matchingEmailKey !== candidateRef.emailKey) {
+        return undefined;
+    }
+    return matchingIndex;
+}
+export function findMatchingAccountIndex(accounts, candidate, options = {}) {
+    const candidateRef = toAccountIdentityRef(candidate);
+    const byComposite = findCompositeAccountMatchIndex(accounts, candidateRef);
+    if (byComposite !== undefined)
+        return byComposite;
+    const byEmail = findSafeEmailMatchIndex(accounts, candidateRef);
+    if (byEmail !== undefined)
+        return byEmail;
+    if (candidateRef.refreshToken) {
+        const byRefresh = findCompatibleRefreshTokenMatchIndex(accounts, candidateRef);
+        if (byRefresh !== undefined)
+            return byRefresh;
+    }
+    return findUniqueAccountIdMatchIndex(accounts, candidateRef, options);
+}
+export function resolveAccountSelectionIndex(accounts, candidate, fallbackIndex = 0) {
+    if (accounts.length === 0)
+        return 0;
+    const matchedIndex = findMatchingAccountIndex(accounts, candidate, {
+        allowUniqueAccountIdFallbackWithoutEmail: true,
+    });
+    if (matchedIndex !== undefined)
+        return matchedIndex;
+    return clampIndex(fallbackIndex, accounts.length);
+}
+function deduplicateAccountsByIdentity(accounts) {
+    const deduplicated = [];
+    for (const account of accounts) {
+        if (!account)
+            continue;
+        const existingIndex = findMatchingAccountIndex(deduplicated, account);
+        if (existingIndex === undefined) {
+            deduplicated.push(account);
+            continue;
+        }
+        deduplicated[existingIndex] = selectNewestAccount(deduplicated[existingIndex], account);
+    }
+    return deduplicated;
+}
+/**
+ * Removes duplicate accounts, keeping the most recently used entry for each
+ * safely matched identity.
+ */
+export function deduplicateAccounts(accounts) {
+    return deduplicateAccountsByIdentity(accounts);
+}
+export function deduplicateAccountsByEmail(accounts) {
+    return deduplicateAccountsByIdentity(accounts);
+}
+function extractActiveAccountRef(accounts, activeIndex) {
+    const candidate = accounts[activeIndex];
+    if (!isRecord(candidate))
+        return {};
+    return toAccountIdentityRef({
+        accountId: typeof candidate.accountId === "string" ? candidate.accountId : undefined,
+        email: typeof candidate.email === "string" ? candidate.email : undefined,
+        refreshToken: typeof candidate.refreshToken === "string"
+            ? candidate.refreshToken
+            : undefined,
+    });
+}
+/**
+ * Normalizes and validates account storage data, migrating from v1 to v3 if needed.
+ * Handles deduplication, index clamping, and per-family active index mapping.
+ * @param data - Raw storage data (unknown format)
+ * @returns Normalized AccountStorageV3 or null if invalid
+ */
+export function normalizeAccountStorage(data) {
+    if (!isRecord(data)) {
+        log.warn("Invalid storage format, ignoring");
+        return null;
+    }
+    if (data.version !== 1 && data.version !== 3) {
+        log.warn("Unknown storage version, ignoring", {
+            version: data.version,
+        });
+        return null;
+    }
+    const rawAccounts = data.accounts;
+    if (!Array.isArray(rawAccounts)) {
+        log.warn("Invalid storage format, ignoring");
+        return null;
+    }
+    const activeIndexValue = typeof data.activeIndex === "number" && Number.isFinite(data.activeIndex)
+        ? data.activeIndex
+        : 0;
+    const rawActiveIndex = clampIndex(activeIndexValue, rawAccounts.length);
+    const activeRef = extractActiveAccountRef(rawAccounts, rawActiveIndex);
+    const fromVersion = data.version;
+    const baseStorage = fromVersion === 1
+        ? migrateV1ToV3(data)
+        : data;
+    const validAccounts = rawAccounts.filter((account) => isRecord(account) &&
+        typeof account.refreshToken === "string" &&
+        !!account.refreshToken.trim());
+    const deduplicatedAccounts = deduplicateAccounts(validAccounts);
+    const activeIndex = (() => {
+        if (deduplicatedAccounts.length === 0)
+            return 0;
+        return resolveAccountSelectionIndex(deduplicatedAccounts, {
+            accountId: activeRef.accountId,
+            email: activeRef.emailKey,
+            refreshToken: activeRef.refreshToken,
+        }, rawActiveIndex);
+    })();
+    const activeIndexByFamily = {};
+    const rawFamilyIndices = isRecord(baseStorage.activeIndexByFamily)
+        ? baseStorage.activeIndexByFamily
+        : {};
+    for (const family of MODEL_FAMILIES) {
+        const rawIndexValue = rawFamilyIndices[family];
+        const rawIndex = typeof rawIndexValue === "number" && Number.isFinite(rawIndexValue)
+            ? rawIndexValue
+            : rawActiveIndex;
+        const clampedRawIndex = clampIndex(rawIndex, rawAccounts.length);
+        const familyRef = extractActiveAccountRef(rawAccounts, clampedRawIndex);
+        activeIndexByFamily[family] = resolveAccountSelectionIndex(deduplicatedAccounts, {
+            accountId: familyRef.accountId,
+            email: familyRef.emailKey,
+            refreshToken: familyRef.refreshToken,
+        }, rawIndex);
+    }
+    return {
+        version: 3,
+        accounts: deduplicatedAccounts,
+        activeIndex,
+        activeIndexByFamily,
+    };
+}
+/**
+ * Loads OAuth accounts from disk storage.
+ * Automatically migrates v1 storage to v3 format if needed.
+ * @returns AccountStorageV3 if file exists and is valid, null otherwise
+ */
+export async function loadAccounts() {
+    return loadAccountsInternal(saveAccounts);
+}
+export async function getBackupMetadata() {
+    const storagePath = getStoragePath();
+    const flaggedPath = getFlaggedAccountsPath();
+    return buildBackupMetadata({
+        storagePath,
+        flaggedPath,
+        walPath: getAccountsWalPath(storagePath),
+        getAccountsBackupRecoveryCandidatesWithDiscovery,
+        describeAccountSnapshot,
+        describeAccountsWalSnapshot,
+        describeFlaggedSnapshot,
+        buildMetadataSection,
+    });
+}
+export async function getRestoreAssessment() {
+    const storagePath = getStoragePath();
+    const resetMarkerPath = getIntentionalResetMarkerPath(storagePath);
+    const backupMetadata = await getBackupMetadata();
+    return buildRestoreAssessment({
+        storagePath,
+        backupMetadata,
+        hasResetMarker: existsSync(resetMarkerPath),
+    });
+}
+async function loadAccountsFromJournal(path) {
+    const walPath = getAccountsWalPath(path);
+    const resetMarkerPath = getIntentionalResetMarkerPath(path);
+    if (existsSync(resetMarkerPath)) {
+        return null;
+    }
+    try {
+        const raw = await fs.readFile(walPath, "utf-8");
+        if (existsSync(resetMarkerPath)) {
+            return null;
+        }
+        const parsed = JSON.parse(raw);
+        if (!isRecord(parsed))
+            return null;
+        const entry = parsed;
+        if (entry.version !== 1)
+            return null;
+        if (typeof entry.content !== "string" || typeof entry.checksum !== "string")
+            return null;
+        const computed = computeSha256(entry.content);
+        if (computed !== entry.checksum) {
+            log.warn("Account journal checksum mismatch", { path: walPath });
+            return null;
+        }
+        const data = JSON.parse(entry.content);
+        const { normalized } = parseAndNormalizeStorage(data, normalizeAccountStorage, isRecord);
+        if (!normalized)
+            return null;
+        log.warn("Recovered account storage from WAL journal", { path, walPath });
+        return normalized;
+    }
+    catch (error) {
+        const code = error.code;
+        if (code !== "ENOENT") {
+            log.warn("Failed to load account WAL journal", {
+                path: walPath,
+                error: String(error),
+            });
+        }
+        return null;
+    }
+}
+async function loadAccountsInternal(persistMigration) {
+    const path = getStoragePath();
+    const resetMarkerPath = getIntentionalResetMarkerPath(path);
+    await cleanupStaleRotatingBackupArtifacts(path);
+    const migratedLegacyStorage = persistMigration
+        ? await migrateLegacyProjectStorageIfNeeded({ persist: persistMigration })
+        : null;
+    try {
+        const { normalized, storedVersion, schemaErrors } = await loadAccountsFromPath(path, {
+            normalizeAccountStorage,
+            isRecord,
+        });
+        if (schemaErrors.length > 0) {
+            log.warn("Account storage schema validation warnings", {
+                errors: schemaErrors.slice(0, 5),
+            });
+        }
+        if (normalized && storedVersion !== normalized.version) {
+            log.info("Migrating account storage to v3", {
+                from: storedVersion,
+                to: normalized.version,
+            });
+            if (persistMigration) {
+                try {
+                    await persistMigration(normalized);
+                }
+                catch (saveError) {
+                    log.warn("Failed to persist migrated storage", {
+                        error: String(saveError),
+                    });
+                }
+            }
+        }
+        if (existsSync(resetMarkerPath)) {
+            return createEmptyStorageWithMetadata(false, "intentional-reset");
+        }
+        if (normalized && normalized.accounts.length === 0) {
+            return withRestoreMetadata(normalized, true, "empty-storage");
+        }
+        const primaryLooksSynthetic = looksLikeSyntheticFixtureStorage(normalized);
+        if (storageBackupEnabled && normalized && primaryLooksSynthetic) {
+            const backupCandidates = await getAccountsBackupRecoveryCandidatesWithDiscovery(path);
+            for (const backupPath of backupCandidates) {
+                if (backupPath === path)
+                    continue;
+                try {
+                    const backup = await loadAccountsFromPath(backupPath, {
+                        normalizeAccountStorage,
+                        isRecord,
+                    });
+                    if (!backup.normalized)
+                        continue;
+                    if (looksLikeSyntheticFixtureStorage(backup.normalized))
+                        continue;
+                    if (backup.normalized.accounts.length <= 0)
+                        continue;
+                    log.warn("Detected synthetic primary account storage; promoting backup", {
+                        path,
+                        backupPath,
+                        primaryAccounts: normalized.accounts.length,
+                        backupAccounts: backup.normalized.accounts.length,
+                    });
+                    if (persistMigration) {
+                        try {
+                            await persistMigration(backup.normalized);
+                        }
+                        catch (persistError) {
+                            log.warn("Failed to persist promoted backup storage", {
+                                path,
+                                error: String(persistError),
+                            });
+                        }
+                    }
+                    return backup.normalized;
+                }
+                catch (backupError) {
+                    const backupCode = backupError.code;
+                    if (backupCode !== "ENOENT") {
+                        log.warn("Failed to load candidate backup for synthetic-primary promotion", {
+                            path: backupPath,
+                            error: String(backupError),
+                        });
+                    }
+                }
+            }
+        }
+        return normalized;
+    }
+    catch (error) {
+        const code = error.code;
+        if (existsSync(resetMarkerPath)) {
+            return createEmptyStorageWithMetadata(false, "intentional-reset");
+        }
+        if (code === "ENOENT" && migratedLegacyStorage) {
+            return migratedLegacyStorage;
+        }
+        const recoveredFromWal = await loadAccountsFromJournal(path);
+        if (recoveredFromWal) {
+            if (persistMigration) {
+                try {
+                    await persistMigration(recoveredFromWal);
+                }
+                catch (persistError) {
+                    log.warn("Failed to persist WAL-recovered storage", {
+                        path,
+                        error: String(persistError),
+                    });
+                }
+            }
+            return recoveredFromWal;
+        }
+        if (existsSync(resetMarkerPath)) {
+            return createEmptyStorageWithMetadata(false, "intentional-reset");
+        }
+        if (storageBackupEnabled) {
+            const backupCandidates = await getAccountsBackupRecoveryCandidatesWithDiscovery(path);
+            for (const backupPath of backupCandidates) {
+                try {
+                    const backup = await loadAccountsFromPath(backupPath, {
+                        normalizeAccountStorage,
+                        isRecord,
+                    });
+                    if (backup.schemaErrors.length > 0) {
+                        log.warn("Backup account storage schema validation warnings", {
+                            path: backupPath,
+                            errors: backup.schemaErrors.slice(0, 5),
+                        });
+                    }
+                    if (backup.normalized) {
+                        log.warn("Recovered account storage from backup file", {
+                            path,
+                            backupPath,
+                        });
+                        if (persistMigration) {
+                            try {
+                                await persistMigration(backup.normalized);
+                            }
+                            catch (persistError) {
+                                log.warn("Failed to persist recovered backup storage", {
+                                    path,
+                                    error: String(persistError),
+                                });
+                            }
+                        }
+                        return backup.normalized;
+                    }
+                }
+                catch (backupError) {
+                    const backupCode = backupError.code;
+                    if (backupCode !== "ENOENT") {
+                        log.warn("Failed to load backup account storage", {
+                            path: backupPath,
+                            error: String(backupError),
+                        });
+                    }
+                }
+            }
+        }
+        if (code !== "ENOENT") {
+            log.error("Failed to load account storage", { error: String(error) });
+        }
+        if (code === "ENOENT") {
+            return createEmptyStorageWithMetadata(true, "missing-storage");
+        }
+        return null;
+    }
+}
+async function loadAccountsForExport() {
+    // Export reuses this helper from both paths in `exportAccounts()`. Keep the
+    // read side effect free so export never clears a reset marker or races with
+    // concurrent writers while normalizing legacy storage for the snapshot.
+    const path = getStoragePath();
+    const resetMarkerPath = getIntentionalResetMarkerPath(path);
+    if (existsSync(resetMarkerPath)) {
+        return createEmptyStorageWithMetadata(false, "intentional-reset");
+    }
+    try {
+        const { normalized, schemaErrors } = await loadAccountsFromPath(path, {
+            normalizeAccountStorage,
+            isRecord,
+        });
+        if (schemaErrors.length > 0) {
+            log.warn("Account storage schema validation warnings", {
+                errors: schemaErrors.slice(0, 5),
+            });
+        }
+        if (existsSync(resetMarkerPath)) {
+            return createEmptyStorageWithMetadata(false, "intentional-reset");
+        }
+        return normalized;
+    }
+    catch (error) {
+        const code = error.code;
+        if (existsSync(resetMarkerPath)) {
+            return createEmptyStorageWithMetadata(false, "intentional-reset");
+        }
+        if (code === "ENOENT") {
+            const migratedLegacyStorage = await migrateLegacyProjectStorageIfNeeded({ commit: false });
+            if (existsSync(resetMarkerPath)) {
+                return createEmptyStorageWithMetadata(false, "intentional-reset");
+            }
+            return migratedLegacyStorage;
+        }
+        throw error;
+    }
+}
+async function saveAccountsUnlocked(storage) {
+    const path = getStoragePath();
+    const resetMarkerPath = getIntentionalResetMarkerPath(path);
+    const walPath = getAccountsWalPath(path);
+    return saveAccountsToDisk(storage, {
+        path,
+        resetMarkerPath,
+        walPath,
+        storageBackupEnabled: storageBackupEnabled && existsSync(path),
+        ensureDirectory: async () => {
+            await fs.mkdir(dirname(path), { recursive: true });
+        },
+        ensureGitignore: () => ensureGitignore(path),
+        looksLikeSyntheticFixtureStorage,
+        loadExistingStorage: () => loadNormalizedStorageFromPath(path, "existing account storage", {
+            loadAccountsFromPath: (candidatePath) => loadAccountsFromPath(candidatePath, {
+                normalizeAccountStorage,
+                isRecord,
+            }),
+            logWarn: (message, details) => {
+                log.warn(message, details);
+            },
+        }),
+        createSyntheticFixtureError: () => new StorageError("Refusing to overwrite non-synthetic account storage with synthetic fixture payload", "EINVALID", path, "Detected synthetic fixture-like account payload. Use explicit account import/login commands instead."),
+        createRotatingAccountsBackup,
+        computeSha256,
+        writeJournal: async (content, journalPath) => {
+            const journalEntry = {
+                version: 1,
+                createdAt: Date.now(),
+                path: journalPath,
+                checksum: computeSha256(content),
+                content,
+            };
+            await fs.writeFile(walPath, JSON.stringify(journalEntry), {
+                encoding: "utf-8",
+                mode: 0o600,
+            });
+        },
+        writeTemp: (tempPath, content) => fs.writeFile(tempPath, content, { encoding: "utf-8", mode: 0o600 }),
+        statTemp: (tempPath) => fs.stat(tempPath),
+        renameTempToPath: async (tempPath) => {
+            let lastError = null;
+            for (let attempt = 0; attempt < 5; attempt++) {
+                try {
+                    await fs.rename(tempPath, path);
+                    return;
+                }
+                catch (renameError) {
+                    const code = renameError.code;
+                    if (code === "EPERM" || code === "EBUSY") {
+                        lastError = renameError;
+                        await new Promise((r) => setTimeout(r, 10 * 2 ** attempt));
+                        continue;
+                    }
+                    throw renameError;
+                }
+            }
+            if (lastError)
+                throw lastError;
+        },
+        cleanupResetMarker: async () => {
+            try {
+                await fs.unlink(resetMarkerPath);
+            }
+            catch {
+                // Best effort cleanup.
+            }
+        },
+        cleanupWal: async () => {
+            try {
+                await fs.unlink(walPath);
+            }
+            catch {
+                // Best effort cleanup.
+            }
+        },
+        cleanupTemp: async (tempPath) => {
+            try {
+                await fs.unlink(tempPath);
+            }
+            catch {
+                // Ignore cleanup failure.
+            }
+        },
+        onSaved: () => {
+            lastAccountsSaveTimestamp = Date.now();
+        },
+        logWarn: (message, details) => {
+            log.warn(message, details);
+        },
+        logError: (message, details) => {
+            log.error(message, details);
+        },
+        createStorageError: (error) => {
+            const err = error;
+            const code = err?.code || "UNKNOWN";
+            const hint = formatStorageErrorHint(error, path);
+            return new StorageError(`Failed to save accounts: ${err?.message || "Unknown error"}`, code, path, hint, err instanceof Error ? err : undefined);
+        },
+        backupPath: getAccountsBackupPath(path),
+        createTempPath: () => `${path}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`,
+    });
+}
+function cloneFlaggedStorageForPersistence(storage) {
+    return {
+        version: 1,
+        accounts: structuredClone(storage?.accounts ?? []),
+    };
+}
+export async function withAccountStorageTransaction(handler) {
+    return runWithAccountStorageTransaction(handler, {
+        getStoragePath,
+        loadCurrent: () => loadAccountsInternal(saveAccountsUnlocked),
+        saveAccounts: saveAccountsUnlocked,
+    });
+}
+export async function withAccountAndFlaggedStorageTransaction(handler) {
+    return withStorageLock(async () => {
+        const storagePath = getStoragePath();
+        const state = {
+            snapshot: await loadAccountsInternal(saveAccountsUnlocked),
+            storagePath,
+            active: true,
+        };
+        const current = state.snapshot;
+        const currentFlagged = await loadFlaggedAccounts();
+        const persist = async (accountStorage, flaggedStorage) => {
+            const previousAccounts = cloneAccountStorageForPersistence(state.snapshot);
+            const nextAccounts = cloneAccountStorageForPersistence(accountStorage);
+            const nextFlagged = cloneFlaggedStorageForPersistence(flaggedStorage);
+            await saveAccountsUnlocked(nextAccounts);
+            try {
+                await saveFlaggedAccountsUnlocked(nextFlagged);
+                state.snapshot = nextAccounts;
+            }
+            catch (error) {
+                try {
+                    await saveAccountsUnlocked(previousAccounts);
+                    state.snapshot = previousAccounts;
+                }
+                catch (rollbackError) {
+                    const combinedError = new AggregateError([error, rollbackError], "Flagged save failed and account storage rollback also failed");
+                    log.error("Failed to rollback account storage after flagged save failure", {
+                        error: String(error),
+                        rollbackError: String(rollbackError),
+                    });
+                    throw combinedError;
+                }
+                throw error;
+            }
+        };
+        return runInTransactionSnapshotContext(state, () => handler(current, persist, currentFlagged));
+    });
+}
+export async function withFlaggedStorageTransaction(handler) {
+    return withStorageLock(async () => {
+        const current = await loadFlaggedAccounts();
+        let snapshot = cloneFlaggedStorageForPersistence(current);
+        const persist = async (storage) => {
+            const previousStorage = cloneFlaggedStorageForPersistence(snapshot);
+            const nextStorage = cloneFlaggedStorageForPersistence(storage);
+            try {
+                await saveFlaggedAccountsUnlocked(nextStorage);
+                snapshot = nextStorage;
+            }
+            catch (error) {
+                try {
+                    await saveFlaggedAccountsUnlocked(previousStorage);
+                    snapshot = previousStorage;
+                }
+                catch (rollbackError) {
+                    const combinedError = new AggregateError([error, rollbackError], "Flagged save failed and flagged storage rollback also failed");
+                    log.error("Failed to rollback flagged storage after flagged save failure", {
+                        error: String(error),
+                        rollbackError: String(rollbackError),
+                    });
+                    throw combinedError;
+                }
+                throw error;
+            }
+        };
+        return handler(structuredClone(snapshot), persist);
+    });
+}
+/**
+ * Persists account storage to disk using atomic write (temp file + rename).
+ * Creates the Codex multi-auth storage directory if it doesn't exist.
+ * Verifies file was written correctly and provides detailed error messages.
+ * @param storage - Account storage data to save
+ * @throws StorageError with platform-aware hints on failure
+ */
+export async function saveAccounts(storage) {
+    return saveAccountsEntry({
+        storage,
+        withStorageLock,
+        saveUnlocked: saveAccountsUnlocked,
+    });
+}
+/**
+ * Deletes the account storage file from disk.
+ * Silently ignores if file doesn't exist.
+ */
+export async function clearAccounts() {
+    const path = getStoragePath();
+    return clearAccountsEntry({
+        path,
+        withStorageLock,
+        resetMarkerPath: getIntentionalResetMarkerPath(path),
+        walPath: getAccountsWalPath(path),
+        getBackupPaths: () => getAccountsBackupRecoveryCandidatesWithDiscovery(path),
+        clearAccountStorageArtifacts,
+        logError: (message, details) => {
+            log.error(message, details);
+        },
+    });
+}
+export async function loadFlaggedAccounts() {
+    return loadFlaggedAccountsEntry({
+        getFlaggedAccountsPath,
+        getLegacyFlaggedAccountsPath,
+        getIntentionalResetMarkerPath,
+        normalizeFlaggedStorage: (data) => normalizeFlaggedStorage(data, {
+            isRecord,
+            now: () => Date.now(),
+        }),
+        saveFlaggedAccounts,
+        loadFlaggedAccountsState,
+        logError: (message, details) => {
+            log.error(message, details);
+        },
+        logInfo: (message, details) => {
+            log.info(message, details);
+        },
+    });
+}
+async function saveFlaggedAccountsUnlocked(storage) {
+    const path = getFlaggedAccountsPath();
+    return saveFlaggedAccountsUnlockedToDisk(storage, {
+        path,
+        markerPath: getIntentionalResetMarkerPath(path),
+        normalizeFlaggedStorage: (data) => normalizeFlaggedStorage(data, {
+            isRecord,
+            now: () => Date.now(),
+        }),
+        copyFileWithRetry,
+        renameFileWithRetry,
+        logWarn: (message, details) => {
+            log.warn(message, details);
+        },
+        logError: (message, details) => {
+            log.error(message, details);
+        },
+    });
+}
+export async function saveFlaggedAccounts(storage) {
+    return saveFlaggedAccountsEntry({
+        storage,
+        withStorageLock,
+        saveUnlocked: saveFlaggedAccountsUnlocked,
+    });
+}
+export async function clearFlaggedAccounts() {
+    const path = getFlaggedAccountsPath();
+    return clearFlaggedAccountsEntry({
+        path,
+        withStorageLock,
+        markerPath: getIntentionalResetMarkerPath(path),
+        getBackupPaths: () => getAccountsBackupRecoveryCandidatesWithDiscovery(path),
+        clearFlaggedAccountsOnDisk,
+        logError: (message, details) => {
+            log.error(message, details);
+        },
+    });
+}
+/**
+ * Exports current accounts to a JSON file for backup/migration.
+ * @param filePath - Destination file path
+ * @param force - If true, overwrite existing file (default: true)
+ * @throws Error if file exists and force is false, or if no accounts to export
+ */
+export async function exportAccounts(filePath, force = true, beforeCommit) {
+    const resolvedPath = resolvePath(filePath);
+    const currentStoragePath = getStoragePath();
+    await exportAccountsSnapshot({
+        resolvedPath,
+        force,
+        currentStoragePath,
+        transactionState: getTransactionSnapshotState(),
+        readCurrentStorageUnlocked: () => loadAccountsForExport(),
+        readCurrentStorage: () => withStorageLock(() => loadAccountsForExport()),
+        exportAccountsToFile,
+        beforeCommit,
+        logInfo: (message, details) => {
+            log.info(message, details);
+        },
+    });
+}
+/**
+ * Imports accounts from a JSON file, merging with existing accounts.
+ * Deduplicates by safe account identity, preserving most recently used entries.
+ * @param filePath - Source file path
+ * @throws Error if file is invalid or would exceed MAX_ACCOUNTS
+ */
+export async function importAccounts(filePath) {
+    const resolvedPath = resolvePath(filePath);
+    return importAccountsSnapshot({
+        resolvedPath,
+        readImportFile,
+        normalizeAccountStorage,
+        withAccountStorageTransaction,
+        mergeImportedAccounts,
+        maxAccounts: ACCOUNT_LIMITS.MAX_ACCOUNTS,
+        deduplicateAccounts,
+        logInfo: (message, details) => {
+            log.info(message, details);
+        },
+    });
+}
+//# sourceMappingURL=storage.js.map

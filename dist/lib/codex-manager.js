@@ -1,0 +1,2563 @@
+import { stdin as input, stdout as output } from "node:process";
+import { createInterface } from "node:readline/promises";
+import { extractAccountEmail, extractAccountId, formatAccountLabel, formatWaitTime, getAccountIdCandidates, resolveRequestAccountId, sanitizeEmail, selectBestAccountCandidate, shouldUpdateAccountIdFromToken, } from "./accounts.js";
+import { createAuthorizationFlow, exchangeAuthorizationCode, parseAuthorizationInput, REDIRECT_URI, } from "./auth/auth.js";
+import { copyTextToClipboard, isBrowserLaunchSuppressed, openBrowserUrl, } from "./auth/browser.js";
+import { startLocalOAuthServer } from "./auth/server.js";
+import { promptAddAnotherAccount, promptLoginMode, } from "./cli.js";
+import { loadCodexCliState } from "./codex-cli/state.js";
+import { setCodexCliActiveSelection } from "./codex-cli/writer.js";
+import { runBestCommand, } from "./codex-manager/commands/best.js";
+import { runCheckCommand } from "./codex-manager/commands/check.js";
+import { runConfigExplainCommand } from "./codex-manager/commands/config-explain.js";
+import { runDebugBundleCommand } from "./codex-manager/commands/debug-bundle.js";
+import { runDoctor as runRepairDoctor, runFix as runRepairFix, runVerifyFlagged as runRepairVerifyFlagged, } from "./codex-manager/repair-commands.js";
+import { runForecastCommand } from "./codex-manager/commands/forecast.js";
+import { runInitConfigCommand } from "./codex-manager/commands/init-config.js";
+import { runReportCommand } from "./codex-manager/commands/report.js";
+import { runFeaturesCommand, runStatusCommand, } from "./codex-manager/commands/status.js";
+import { runSwitchCommand } from "./codex-manager/commands/switch.js";
+import { parseAuthLoginArgs, printUsage } from "./codex-manager/help.js";
+import { applyUiThemeFromDashboardSettings, configureUnifiedSettings, resolveMenuLayoutMode, } from "./codex-manager/settings-hub.js";
+import { getPluginConfigExplainReport } from "./config.js";
+import { ACCOUNT_LIMITS } from "./constants.js";
+import { DEFAULT_DASHBOARD_DISPLAY_SETTINGS, loadDashboardDisplaySettings, } from "./dashboard-settings.js";
+import { evaluateForecastAccounts, recommendForecastAccount, summarizeForecast, } from "./forecast.js";
+import { createLogger } from "./logger.js";
+import { MODEL_FAMILIES } from "./prompts/codex.js";
+import { getModelCapabilities, getModelProfile, resolveNormalizedModel, } from "./request/helpers/model-map.js";
+import { loadQuotaCache, saveQuotaCache, } from "./quota-cache.js";
+import { fetchCodexQuotaSnapshot, formatQuotaSnapshotLine, } from "./quota-probe.js";
+import { queuedRefresh } from "./refresh-queue.js";
+import { clearAccounts, findMatchingAccountIndex, formatStorageErrorHint, getLastAccountsSaveTimestamp, getNamedBackups, getStoragePath, loadAccounts, loadFlaggedAccounts, restoreAccountsFromBackup, StorageError, saveAccounts, setStoragePath, withAccountStorageTransaction, } from "./storage.js";
+import { ANSI } from "./ui/ansi.js";
+import { confirm } from "./ui/confirm.js";
+import { UI_COPY } from "./ui/copy.js";
+import { paintUiText, quotaToneFromLeftPercent } from "./ui/format.js";
+import { getUiRuntimeOptions } from "./ui/runtime.js";
+import { select } from "./ui/select.js";
+const log = createLogger("codex-manager");
+function stylePromptText(text, tone) {
+    if (!output.isTTY)
+        return text;
+    const ui = getUiRuntimeOptions();
+    if (ui.v2Enabled) {
+        if (tone === "muted") {
+            return `${ui.theme.colors.dim}${paintUiText(ui, text, "muted")}${ui.theme.colors.reset}`;
+        }
+        const mapped = tone === "accent" ? "primary" : tone;
+        return paintUiText(ui, text, mapped);
+    }
+    const legacyCode = tone === "accent"
+        ? ANSI.green
+        : tone === "success"
+            ? ANSI.green
+            : tone === "warning"
+                ? ANSI.yellow
+                : tone === "danger"
+                    ? ANSI.red
+                    : ANSI.dim;
+    return `${legacyCode}${text}${ANSI.reset}`;
+}
+function inspectRequestedModel(requestedModel) {
+    const normalized = resolveNormalizedModel(requestedModel);
+    const profile = getModelProfile(normalized);
+    return {
+        requested: requestedModel,
+        normalized,
+        remapped: requestedModel !== normalized,
+        promptFamily: profile.promptFamily,
+        capabilities: getModelCapabilities(normalized),
+    };
+}
+function formatModelInspection(model) {
+    const route = model.remapped
+        ? `${model.requested} -> ${model.normalized}`
+        : model.normalized;
+    return [
+        route,
+        `prompt family ${model.promptFamily}`,
+        `tool search ${model.capabilities.toolSearch ? "yes" : "no"}`,
+        `computer use ${model.capabilities.computerUse ? "yes" : "no"}`,
+    ].join(" | ");
+}
+function collapseWhitespace(value) {
+    return value.replace(/\s+/g, " ").trim();
+}
+function formatReasonLabel(reason) {
+    if (!reason)
+        return undefined;
+    const normalized = collapseWhitespace(reason.replace(/_/g, " "));
+    return normalized.length > 0 ? normalized : undefined;
+}
+function extractErrorMessageFromPayload(payload) {
+    if (!payload || typeof payload !== "object")
+        return undefined;
+    const record = payload;
+    const directMessage = typeof record.message === "string"
+        ? collapseWhitespace(record.message)
+        : "";
+    const directCode = typeof record.code === "string" ? collapseWhitespace(record.code) : "";
+    if (directMessage) {
+        if (directCode &&
+            !directMessage.toLowerCase().includes(directCode.toLowerCase())) {
+            return `${directMessage} [${directCode}]`;
+        }
+        return directMessage;
+    }
+    const nested = record.error;
+    if (nested && typeof nested === "object") {
+        return extractErrorMessageFromPayload(nested);
+    }
+    return undefined;
+}
+function parseStructuredErrorMessage(raw) {
+    const trimmed = raw.trim();
+    if (!trimmed)
+        return undefined;
+    const candidates = new Set([trimmed]);
+    const firstBrace = trimmed.indexOf("{");
+    const lastBrace = trimmed.lastIndexOf("}");
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+        candidates.add(trimmed.slice(firstBrace, lastBrace + 1));
+    }
+    for (const candidate of candidates) {
+        try {
+            const parsed = JSON.parse(candidate);
+            const message = extractErrorMessageFromPayload(parsed);
+            if (message)
+                return message;
+        }
+        catch {
+            // ignore non-JSON candidates
+        }
+    }
+    return undefined;
+}
+function normalizeFailureDetail(message, reason) {
+    const reasonLabel = formatReasonLabel(reason);
+    const raw = message?.trim() || reasonLabel || "refresh failed";
+    const structured = parseStructuredErrorMessage(raw);
+    const normalized = collapseWhitespace(structured ?? raw);
+    const bounded = normalized.length > 260 ? `${normalized.slice(0, 257)}...` : normalized;
+    return bounded.length > 0 ? bounded : "refresh failed";
+}
+function joinStyledSegments(parts) {
+    if (parts.length === 0)
+        return "";
+    const separator = stylePromptText(" | ", "muted");
+    return parts.join(separator);
+}
+function formatResultSummary(segments) {
+    const rendered = segments.map((segment) => stylePromptText(segment.text, segment.tone));
+    return `${stylePromptText("Result:", "accent")} ${joinStyledSegments(rendered)}`;
+}
+function createRepairCommandDeps() {
+    return {
+        stylePromptText,
+        styleAccountDetailText,
+        formatResultSummary,
+        resolveActiveIndex,
+        hasUsableAccessToken,
+        hasLikelyInvalidRefreshToken,
+        normalizeFailureDetail,
+        buildQuotaEmailFallbackState,
+        updateQuotaCacheForAccount,
+        cloneQuotaCacheData,
+        pruneUnsafeQuotaEmailCacheEntry,
+        formatCompactQuotaSnapshot,
+        resolveStoredAccountIdentity,
+        applyTokenAccountIdentity,
+    };
+}
+function isOAuthCancellation(result) {
+    const message = (result.message ?? result.reason ?? "").trim().toLowerCase();
+    return message.includes("cancelled") || message.includes("canceled");
+}
+function styleQuotaSummary(summary) {
+    const normalized = collapseWhitespace(summary);
+    if (!normalized)
+        return stylePromptText(summary, "muted");
+    const segments = normalized
+        .split("|")
+        .map((segment) => segment.trim())
+        .filter(Boolean);
+    if (segments.length === 0)
+        return stylePromptText(normalized, "muted");
+    const rendered = segments.map((segment) => {
+        if (/rate-limited/i.test(segment)) {
+            return stylePromptText(segment, "danger");
+        }
+        const match = segment.match(/^([0-9a-zA-Z]+)\s+(\d{1,3})%$/);
+        if (!match) {
+            return stylePromptText(segment, "muted");
+        }
+        const windowLabel = match[1] ?? "";
+        const leftPercent = Number.parseInt(match[2] ?? "", 10);
+        if (!Number.isFinite(leftPercent)) {
+            return stylePromptText(segment, "muted");
+        }
+        const tone = quotaToneFromLeftPercent(leftPercent);
+        return `${stylePromptText(windowLabel, "muted")} ${stylePromptText(`${leftPercent}%`, tone)}`;
+    });
+    return joinStyledSegments(rendered);
+}
+function styleAccountDetailText(detail, fallbackTone = "muted") {
+    const compact = collapseWhitespace(detail);
+    if (!compact)
+        return stylePromptText("", fallbackTone);
+    const quotaMatch = compact.match(/^(.*?)\(([^()]*\d{1,3}%[^()]*)\)(.*)$/);
+    if (quotaMatch) {
+        const prefix = (quotaMatch[1] ?? "").trim();
+        const quota = (quotaMatch[2] ?? "").trim();
+        const suffix = (quotaMatch[3] ?? "").trim();
+        const prefixTone = /failed|error/i.test(prefix)
+            ? "danger"
+            : /ok|working|succeeded|valid/i.test(prefix)
+                ? "success"
+                : fallbackTone;
+        const suffixTone = /re-login|stale|warning|retry|fallback/i.test(suffix)
+            ? "warning"
+            : /failed|error/i.test(suffix)
+                ? "danger"
+                : "muted";
+        const chunks = [];
+        if (prefix)
+            chunks.push(stylePromptText(prefix, prefixTone));
+        chunks.push(`(${styleQuotaSummary(quota)})`);
+        if (suffix)
+            chunks.push(stylePromptText(suffix, suffixTone));
+        return chunks.join(" ");
+    }
+    if (/rate-limited/i.test(compact))
+        return stylePromptText(compact, "danger");
+    if (/re-login|stale|warning|fallback/i.test(compact))
+        return stylePromptText(compact, "warning");
+    if (/failed|error/i.test(compact))
+        return stylePromptText(compact, "danger");
+    if (/ok|working|succeeded|valid/i.test(compact))
+        return stylePromptText(compact, "success");
+    return stylePromptText(compact, fallbackTone);
+}
+function riskTone(level) {
+    if (level === "low")
+        return "success";
+    if (level === "medium")
+        return "warning";
+    return "danger";
+}
+function availabilityTone(availability) {
+    if (availability === "ready")
+        return "success";
+    if (availability === "delayed")
+        return "warning";
+    return "danger";
+}
+function formatQuotaSnapshotForDashboard(snapshot, settings) {
+    if (!settings.showQuotaDetails)
+        return "live session OK";
+    return `live session OK (${formatCompactQuotaSnapshot(snapshot)})`;
+}
+function isAbortError(error) {
+    if (!(error instanceof Error))
+        return false;
+    const maybe = error;
+    return maybe.name === "AbortError" || maybe.code === "ABORT_ERR";
+}
+const IMPLEMENTED_FEATURES = [
+    { id: 1, name: "Multi-account OAuth login dashboard" },
+    { id: 2, name: "Account add/update dedupe by token/id/email" },
+    { id: 3, name: "Set current account command" },
+    { id: 4, name: "Per-family active index handling" },
+    { id: 5, name: "Quick health check command" },
+    { id: 6, name: "Full refresh check command" },
+    { id: 7, name: "Flagged account verification command" },
+    { id: 8, name: "Flagged account restore flow" },
+    { id: 9, name: "Best account forecast engine" },
+    { id: 10, name: "Forecast live quota probing" },
+    { id: 11, name: "Auto-fix command (safe mode)" },
+    { id: 12, name: "Doctor diagnostics command" },
+    { id: 13, name: "JSON outputs for machine automation" },
+    { id: 14, name: "Report generation command" },
+    { id: 15, name: "Storage v3 normalization and migration" },
+    { id: 16, name: "Storage backup and recovery journal" },
+    { id: 17, name: "Project-scoped and global storage paths" },
+    { id: 18, name: "Quota cache storage" },
+    { id: 19, name: "Live account sync watcher" },
+    { id: 20, name: "Session affinity store" },
+    { id: 21, name: "Refresh queue dedupe (in-process)" },
+    { id: 22, name: "Refresh lease dedupe (cross-process)" },
+    { id: 23, name: "Token rotation mapping in refresh queue" },
+    { id: 24, name: "Refresh guardian (proactive refresh)" },
+    { id: 25, name: "Preemptive quota scheduler" },
+    { id: 26, name: "Entitlement cache for unsupported models" },
+    { id: 27, name: "Capability policy scoring store" },
+    { id: 28, name: "Failure policy evaluation module" },
+    { id: 29, name: "Streaming failover pipeline" },
+    { id: 30, name: "Rate-limit backoff and cooldown handling" },
+    { id: 31, name: "Host request transformer bridge" },
+    { id: 32, name: "Prompt template sync with cache" },
+    { id: 33, name: "Codex CLI active-account state sync" },
+    { id: 34, name: "TUI quick-switch hotkeys (1-9)" },
+    { id: 35, name: "TUI search and help toggles" },
+    { id: 36, name: "TUI account detail hotkeys (S/R/E/D)" },
+    { id: 37, name: "TUI settings hub (list/summary/behavior/theme)" },
+    { id: 38, name: "Dashboard display customization" },
+    { id: 39, name: "Unified color/theme runtime (v2 UI)" },
+    { id: 40, name: "OAuth browser-first flow with manual callback fallback" },
+    { id: 41, name: "Auto-switch to best account command" },
+];
+function resolveActiveIndex(storage, family = "codex") {
+    const total = storage.accounts.length;
+    if (total === 0)
+        return 0;
+    const rawCandidate = storage.activeIndexByFamily?.[family] ?? storage.activeIndex;
+    const raw = Number.isFinite(rawCandidate) ? rawCandidate : 0;
+    return Math.max(0, Math.min(raw, total - 1));
+}
+function getRateLimitResetTimeForFamily(account, now, family) {
+    const times = account.rateLimitResetTimes;
+    if (!times)
+        return null;
+    let minReset = null;
+    const prefix = `${family}:`;
+    for (const [key, value] of Object.entries(times)) {
+        if (typeof value !== "number")
+            continue;
+        if (value <= now)
+            continue;
+        if (key !== family && !key.startsWith(prefix))
+            continue;
+        if (minReset === null || value < minReset) {
+            minReset = value;
+        }
+    }
+    return minReset;
+}
+function formatRateLimitEntry(account, now, family = "codex") {
+    const resetAt = getRateLimitResetTimeForFamily(account, now, family);
+    if (typeof resetAt !== "number")
+        return null;
+    const remaining = resetAt - now;
+    if (remaining <= 0)
+        return null;
+    return `resets in ${formatWaitTime(remaining)}`;
+}
+function normalizeQuotaEmail(email) {
+    const normalized = sanitizeEmail(email);
+    return normalized && normalized.length > 0 ? normalized : null;
+}
+function normalizeQuotaAccountId(accountId) {
+    if (typeof accountId !== "string")
+        return null;
+    const trimmed = accountId.trim();
+    return trimmed.length > 0 ? trimmed : null;
+}
+function hasUniqueQuotaAccountId(accounts, account) {
+    const accountId = normalizeQuotaAccountId(account.accountId);
+    if (!accountId)
+        return false;
+    let matchCount = 0;
+    for (const candidate of accounts) {
+        if (normalizeQuotaAccountId(candidate.accountId) !== accountId)
+            continue;
+        matchCount += 1;
+        if (matchCount > 1)
+            return false;
+    }
+    return matchCount === 1;
+}
+function buildQuotaEmailFallbackState(accounts) {
+    const stateByEmail = new Map();
+    for (const account of accounts) {
+        const email = normalizeQuotaEmail(account.email);
+        if (!email)
+            continue;
+        const existing = stateByEmail.get(email);
+        if (existing) {
+            existing.matchingCount += 1;
+            const accountId = normalizeQuotaAccountId(account.accountId);
+            if (accountId) {
+                existing.distinctAccountIds.add(accountId);
+            }
+            continue;
+        }
+        const distinctAccountIds = new Set();
+        const accountId = normalizeQuotaAccountId(account.accountId);
+        if (accountId) {
+            distinctAccountIds.add(accountId);
+        }
+        stateByEmail.set(email, {
+            matchingCount: 1,
+            distinctAccountIds,
+        });
+    }
+    return stateByEmail;
+}
+function hasSafeQuotaEmailFallback(emailFallbackState, account) {
+    const email = normalizeQuotaEmail(account.email);
+    if (!email)
+        return false;
+    const state = emailFallbackState.get(email);
+    if (!state)
+        return false;
+    // size > 1 only matters when multiple accounts share the same email but
+    // disagree on accountId; a single matching account already implies size <= 1.
+    if (state.distinctAccountIds.size > 1)
+        return false;
+    return state.matchingCount === 1;
+}
+function quotaCacheEntryToSnapshot(entry) {
+    return {
+        status: entry.status,
+        planType: entry.planType,
+        model: entry.model,
+        primary: {
+            usedPercent: entry.primary.usedPercent,
+            windowMinutes: entry.primary.windowMinutes,
+            resetAtMs: entry.primary.resetAtMs,
+        },
+        secondary: {
+            usedPercent: entry.secondary.usedPercent,
+            windowMinutes: entry.secondary.windowMinutes,
+            resetAtMs: entry.secondary.resetAtMs,
+        },
+    };
+}
+function formatCompactQuotaWindowLabel(windowMinutes) {
+    if (!windowMinutes || !Number.isFinite(windowMinutes) || windowMinutes <= 0) {
+        return "quota";
+    }
+    if (windowMinutes % 1440 === 0)
+        return `${windowMinutes / 1440}d`;
+    if (windowMinutes % 60 === 0)
+        return `${windowMinutes / 60}h`;
+    return `${windowMinutes}m`;
+}
+function formatCompactQuotaPart(windowMinutes, usedPercent) {
+    const label = formatCompactQuotaWindowLabel(windowMinutes);
+    if (typeof usedPercent !== "number" || !Number.isFinite(usedPercent)) {
+        return null;
+    }
+    const left = quotaLeftPercentFromUsed(usedPercent);
+    return `${label} ${left}%`;
+}
+function quotaLeftPercentFromUsed(usedPercent) {
+    if (typeof usedPercent !== "number" || !Number.isFinite(usedPercent)) {
+        return undefined;
+    }
+    return Math.max(0, Math.min(100, Math.round(100 - usedPercent)));
+}
+function formatCompactQuotaSnapshot(snapshot) {
+    const parts = [
+        formatCompactQuotaPart(snapshot.primary.windowMinutes, snapshot.primary.usedPercent),
+        formatCompactQuotaPart(snapshot.secondary.windowMinutes, snapshot.secondary.usedPercent),
+    ].filter((value) => typeof value === "string" && value.length > 0);
+    if (snapshot.status === 429) {
+        parts.push("rate-limited");
+    }
+    if (parts.length > 0) {
+        return parts.join(" | ");
+    }
+    return formatQuotaSnapshotLine(snapshot);
+}
+function formatAccountQuotaSummary(entry) {
+    const parts = [
+        formatCompactQuotaPart(entry.primary.windowMinutes, entry.primary.usedPercent),
+        formatCompactQuotaPart(entry.secondary.windowMinutes, entry.secondary.usedPercent),
+    ].filter((value) => typeof value === "string" && value.length > 0);
+    if (entry.status === 429) {
+        parts.push("rate-limited");
+    }
+    if (parts.length > 0) {
+        return parts.join(" | ");
+    }
+    return formatQuotaSnapshotLine(quotaCacheEntryToSnapshot(entry));
+}
+function getQuotaCacheEntryForAccount(cache, account, accounts, emailFallbackState = buildQuotaEmailFallbackState(accounts)) {
+    const accountId = normalizeQuotaAccountId(account.accountId);
+    if (accountId &&
+        hasUniqueQuotaAccountId(accounts, account) &&
+        cache.byAccountId[accountId]) {
+        return cache.byAccountId[accountId] ?? null;
+    }
+    const email = normalizeQuotaEmail(account.email);
+    if (email &&
+        hasSafeQuotaEmailFallback(emailFallbackState, account) &&
+        cache.byEmail[email]) {
+        return cache.byEmail[email] ?? null;
+    }
+    return null;
+}
+function updateQuotaCacheForAccount(cache, account, snapshot, accounts, emailFallbackState = buildQuotaEmailFallbackState(accounts)) {
+    const nextEntry = {
+        updatedAt: Date.now(),
+        status: snapshot.status,
+        model: snapshot.model,
+        planType: snapshot.planType,
+        primary: {
+            usedPercent: snapshot.primary.usedPercent,
+            windowMinutes: snapshot.primary.windowMinutes,
+            resetAtMs: snapshot.primary.resetAtMs,
+        },
+        secondary: {
+            usedPercent: snapshot.secondary.usedPercent,
+            windowMinutes: snapshot.secondary.windowMinutes,
+            resetAtMs: snapshot.secondary.resetAtMs,
+        },
+    };
+    let changed = false;
+    const accountId = normalizeQuotaAccountId(account.accountId);
+    const hasUniqueAccountId = accountId !== null && hasUniqueQuotaAccountId(accounts, account);
+    if (hasUniqueAccountId) {
+        cache.byAccountId[accountId] = nextEntry;
+        changed = true;
+    }
+    const email = normalizeQuotaEmail(account.email);
+    if (email &&
+        hasSafeQuotaEmailFallback(emailFallbackState, account) &&
+        !hasUniqueAccountId) {
+        cache.byEmail[email] = nextEntry;
+        changed = true;
+    }
+    else if (email && cache.byEmail[email]) {
+        delete cache.byEmail[email];
+        changed = true;
+    }
+    return changed;
+}
+function cloneQuotaCacheData(cache) {
+    // Shallow spreading is safe because quota cache entries are always replaced,
+    // never mutated in-place.
+    return {
+        byAccountId: { ...cache.byAccountId },
+        byEmail: { ...cache.byEmail },
+    };
+}
+function pruneUnsafeQuotaEmailCacheEntry(cache, email, accounts, emailFallbackState = buildQuotaEmailFallbackState(accounts)) {
+    const normalizedEmail = normalizeQuotaEmail(email);
+    if (!normalizedEmail || !cache.byEmail[normalizedEmail]) {
+        return false;
+    }
+    const hasSafeFallbackAccount = accounts.some((account) => normalizeQuotaEmail(account.email) === normalizedEmail &&
+        hasSafeQuotaEmailFallback(emailFallbackState, account));
+    if (hasSafeFallbackAccount) {
+        return false;
+    }
+    delete cache.byEmail[normalizedEmail];
+    return true;
+}
+const DEFAULT_MENU_QUOTA_REFRESH_TTL_MS = 5 * 60_000;
+const MENU_QUOTA_REFRESH_MODEL = "gpt-5-codex";
+function resolveMenuQuotaProbeInput(account, cache, maxAgeMs, now, accounts, emailFallbackState = buildQuotaEmailFallbackState(accounts)) {
+    if (account.enabled === false)
+        return null;
+    if (!hasUsableAccessToken(account, now))
+        return null;
+    const existing = getQuotaCacheEntryForAccount(cache, account, accounts, emailFallbackState);
+    if (existing &&
+        typeof existing.updatedAt === "number" &&
+        Number.isFinite(existing.updatedAt) &&
+        now - existing.updatedAt < maxAgeMs) {
+        return null;
+    }
+    // Menu auto-refresh is cache-backed, so only probe when the result can be
+    // written behind a safe lookup key for later reuse.
+    const canStore = (normalizeQuotaAccountId(account.accountId) !== null &&
+        hasUniqueQuotaAccountId(accounts, account)) ||
+        hasSafeQuotaEmailFallback(emailFallbackState, account);
+    if (!canStore)
+        return null;
+    const accessToken = account.accessToken;
+    const accountId = accessToken
+        ? (account.accountId ?? extractAccountId(accessToken))
+        : account.accountId;
+    if (!accountId || !accessToken)
+        return null;
+    return { accountId, accessToken };
+}
+function collectMenuQuotaRefreshTargets(storage, cache, maxAgeMs, now = Date.now(), emailFallbackState = buildQuotaEmailFallbackState(storage.accounts)) {
+    const targets = [];
+    for (const account of storage.accounts) {
+        const probeInput = resolveMenuQuotaProbeInput(account, cache, maxAgeMs, now, storage.accounts, emailFallbackState);
+        if (!probeInput)
+            continue;
+        targets.push({
+            account,
+            accountId: probeInput.accountId,
+            accessToken: probeInput.accessToken,
+        });
+    }
+    return targets;
+}
+function countMenuQuotaRefreshTargets(storage, cache, maxAgeMs, now = Date.now()) {
+    const emailFallbackState = buildQuotaEmailFallbackState(storage.accounts);
+    let count = 0;
+    for (const account of storage.accounts) {
+        if (resolveMenuQuotaProbeInput(account, cache, maxAgeMs, now, storage.accounts, emailFallbackState)) {
+            count += 1;
+        }
+    }
+    return count;
+}
+async function refreshQuotaCacheForMenu(storage, cache, maxAgeMs, onProgress) {
+    if (storage.accounts.length === 0) {
+        return cache;
+    }
+    const emailFallbackState = buildQuotaEmailFallbackState(storage.accounts);
+    const nextCache = cloneQuotaCacheData(cache);
+    const now = Date.now();
+    const targets = collectMenuQuotaRefreshTargets(storage, nextCache, maxAgeMs, now, emailFallbackState);
+    const total = targets.length;
+    let processed = 0;
+    onProgress?.(processed, total);
+    let changed = false;
+    for (const target of targets) {
+        processed += 1;
+        onProgress?.(processed, total);
+        try {
+            const snapshot = await fetchCodexQuotaSnapshot({
+                accountId: target.accountId,
+                accessToken: target.accessToken,
+                model: MENU_QUOTA_REFRESH_MODEL,
+            });
+            changed =
+                updateQuotaCacheForAccount(nextCache, target.account, snapshot, storage.accounts, emailFallbackState) || changed;
+        }
+        catch {
+            // Keep existing cached values if probing fails.
+        }
+    }
+    if (changed) {
+        await saveQuotaCache(nextCache);
+    }
+    return nextCache;
+}
+const ACCESS_TOKEN_FRESH_WINDOW_MS = 5 * 60 * 1000;
+function hasUsableAccessToken(account, now) {
+    if (!account.accessToken)
+        return false;
+    if (typeof account.expiresAt !== "number" ||
+        !Number.isFinite(account.expiresAt))
+        return false;
+    return account.expiresAt - now > ACCESS_TOKEN_FRESH_WINDOW_MS;
+}
+function hasLikelyInvalidRefreshToken(refreshToken) {
+    if (!refreshToken)
+        return true;
+    const trimmed = refreshToken.trim();
+    if (trimmed.length < 20)
+        return true;
+    return trimmed.startsWith("token-");
+}
+function mapAccountStatus(account, index, activeIndex, now) {
+    if (account.enabled === false)
+        return "disabled";
+    if (typeof account.coolingDownUntil === "number" &&
+        account.coolingDownUntil > now) {
+        return "cooldown";
+    }
+    const rateLimit = formatRateLimitEntry(account, now, "codex");
+    if (rateLimit)
+        return "rate-limited";
+    if (index === activeIndex)
+        return "active";
+    return "ok";
+}
+function parseLeftPercentFromQuotaSummary(summary, windowLabel) {
+    if (!summary)
+        return -1;
+    const match = summary.match(new RegExp(`(?:^|\\|)\\s*${windowLabel}\\s+(\\d{1,3})%`, "i"));
+    const value = Number.parseInt(match?.[1] ?? "", 10);
+    if (!Number.isFinite(value))
+        return -1;
+    return Math.max(0, Math.min(100, value));
+}
+function readQuotaLeftPercent(account, windowLabel) {
+    const direct = windowLabel === "5h"
+        ? account.quota5hLeftPercent
+        : account.quota7dLeftPercent;
+    if (typeof direct === "number" && Number.isFinite(direct)) {
+        return Math.max(0, Math.min(100, Math.round(direct)));
+    }
+    return parseLeftPercentFromQuotaSummary(account.quotaSummary, windowLabel);
+}
+function accountStatusSortBucket(status) {
+    switch (status) {
+        case "active":
+        case "ok":
+            return 0;
+        case "unknown":
+            return 1;
+        case "cooldown":
+        case "rate-limited":
+            return 2;
+        case "disabled":
+        case "error":
+        case "flagged":
+            return 3;
+        default:
+            return 1;
+    }
+}
+function compareReadyFirstAccounts(left, right) {
+    const left5h = readQuotaLeftPercent(left, "5h");
+    const right5h = readQuotaLeftPercent(right, "5h");
+    if (left5h !== right5h)
+        return right5h - left5h;
+    const left7d = readQuotaLeftPercent(left, "7d");
+    const right7d = readQuotaLeftPercent(right, "7d");
+    if (left7d !== right7d)
+        return right7d - left7d;
+    const bucketDelta = accountStatusSortBucket(left.status) -
+        accountStatusSortBucket(right.status);
+    if (bucketDelta !== 0)
+        return bucketDelta;
+    const leftLastUsed = left.lastUsed ?? 0;
+    const rightLastUsed = right.lastUsed ?? 0;
+    if (leftLastUsed !== rightLastUsed)
+        return rightLastUsed - leftLastUsed;
+    const leftSource = left.sourceIndex ?? left.index;
+    const rightSource = right.sourceIndex ?? right.index;
+    return leftSource - rightSource;
+}
+function applyAccountMenuOrdering(accounts, displaySettings) {
+    const sortEnabled = displaySettings.menuSortEnabled ??
+        DEFAULT_DASHBOARD_DISPLAY_SETTINGS.menuSortEnabled ??
+        true;
+    const sortMode = displaySettings.menuSortMode ??
+        DEFAULT_DASHBOARD_DISPLAY_SETTINGS.menuSortMode ??
+        "ready-first";
+    if (!sortEnabled || sortMode !== "ready-first") {
+        return [...accounts];
+    }
+    const sorted = [...accounts].sort(compareReadyFirstAccounts);
+    const pinCurrent = displaySettings.menuSortPinCurrent ??
+        DEFAULT_DASHBOARD_DISPLAY_SETTINGS.menuSortPinCurrent ??
+        false;
+    if (pinCurrent) {
+        const currentIndex = sorted.findIndex((account) => account.isCurrentAccount);
+        if (currentIndex > 0) {
+            const current = sorted.splice(currentIndex, 1)[0];
+            const first = sorted[0];
+            if (current && first && compareReadyFirstAccounts(current, first) <= 0) {
+                sorted.unshift(current);
+            }
+            else if (current) {
+                sorted.splice(currentIndex, 0, current);
+            }
+        }
+    }
+    return sorted;
+}
+function toExistingAccountInfo(storage, quotaCache, displaySettings) {
+    const now = Date.now();
+    const activeIndex = resolveActiveIndex(storage, "codex");
+    const layoutMode = resolveMenuLayoutMode(displaySettings);
+    const emailFallbackState = buildQuotaEmailFallbackState(storage.accounts);
+    const baseAccounts = storage.accounts.map((account, index) => {
+        const entry = quotaCache
+            ? getQuotaCacheEntryForAccount(quotaCache, account, storage.accounts, emailFallbackState)
+            : null;
+        return {
+            index,
+            sourceIndex: index,
+            accountId: account.accountId,
+            accountLabel: account.accountLabel,
+            email: account.email,
+            addedAt: account.addedAt,
+            lastUsed: account.lastUsed,
+            status: mapAccountStatus(account, index, activeIndex, now),
+            quotaSummary: (displaySettings.menuShowQuotaSummary ?? true) && entry
+                ? formatAccountQuotaSummary(entry)
+                : undefined,
+            quota5hLeftPercent: quotaLeftPercentFromUsed(entry?.primary.usedPercent),
+            quota5hResetAtMs: entry?.primary.resetAtMs,
+            quota7dLeftPercent: quotaLeftPercentFromUsed(entry?.secondary.usedPercent),
+            quota7dResetAtMs: entry?.secondary.resetAtMs,
+            quotaRateLimited: entry?.status === 429,
+            isCurrentAccount: index === activeIndex,
+            enabled: account.enabled !== false,
+            showStatusBadge: displaySettings.menuShowStatusBadge ?? true,
+            showCurrentBadge: displaySettings.menuShowCurrentBadge ?? true,
+            showLastUsed: displaySettings.menuShowLastUsed ?? true,
+            showQuotaCooldown: displaySettings.menuShowQuotaCooldown ?? true,
+            showHintsForUnselectedRows: layoutMode === "expanded-rows",
+            highlightCurrentRow: displaySettings.menuHighlightCurrentRow ?? true,
+            focusStyle: displaySettings.menuFocusStyle ?? "row-invert",
+            statuslineFields: displaySettings.menuStatuslineFields ?? [
+                "last-used",
+                "limits",
+                "status",
+            ],
+        };
+    });
+    const orderedAccounts = applyAccountMenuOrdering(baseAccounts, displaySettings);
+    const quickSwitchUsesVisibleRows = displaySettings.menuSortQuickSwitchVisibleRow ?? true;
+    return orderedAccounts.map((account, displayIndex) => ({
+        ...account,
+        index: displayIndex,
+        quickSwitchNumber: quickSwitchUsesVisibleRows
+            ? displayIndex + 1
+            : (account.sourceIndex ?? displayIndex) + 1,
+    }));
+}
+function resolveAccountSelection(tokens) {
+    const override = (process.env.CODEX_AUTH_ACCOUNT_ID ?? "").trim();
+    if (override) {
+        return {
+            ...tokens,
+            accountIdOverride: override,
+            accountIdSource: "manual",
+        };
+    }
+    const candidates = getAccountIdCandidates(tokens.access, tokens.idToken);
+    if (candidates.length === 0) {
+        return tokens;
+    }
+    if (candidates.length === 1) {
+        const [candidate] = candidates;
+        if (candidate) {
+            return {
+                ...tokens,
+                accountIdOverride: candidate.accountId,
+                accountIdSource: candidate.source,
+                accountLabel: candidate.label,
+            };
+        }
+    }
+    const best = selectBestAccountCandidate(candidates);
+    if (!best) {
+        return tokens;
+    }
+    return {
+        ...tokens,
+        accountIdOverride: best.accountId,
+        accountIdSource: best.source ?? "token",
+        accountLabel: best.label,
+    };
+}
+function resolveStoredAccountIdentity(storedAccountId, storedAccountIdSource, tokenAccountId) {
+    const accountId = resolveRequestAccountId(storedAccountId, storedAccountIdSource, tokenAccountId);
+    if (!accountId) {
+        return {};
+    }
+    if (!shouldUpdateAccountIdFromToken(storedAccountIdSource, storedAccountId)) {
+        return {
+            accountId,
+            accountIdSource: storedAccountIdSource,
+        };
+    }
+    return {
+        accountId,
+        accountIdSource: accountId === tokenAccountId ? "token" : storedAccountIdSource,
+    };
+}
+function applyTokenAccountIdentity(account, tokenAccountId) {
+    const nextIdentity = resolveStoredAccountIdentity(account.accountId, account.accountIdSource, tokenAccountId);
+    if (!nextIdentity.accountId) {
+        return false;
+    }
+    if (nextIdentity.accountId === account.accountId &&
+        nextIdentity.accountIdSource === account.accountIdSource) {
+        return false;
+    }
+    account.accountId = nextIdentity.accountId;
+    account.accountIdSource = nextIdentity.accountIdSource;
+    return true;
+}
+async function promptManualCallback(state, options = {}) {
+    const useInteractivePrompt = input.isTTY && output.isTTY;
+    if (!useInteractivePrompt && !options.allowNonTty) {
+        return null;
+    }
+    const rl = createInterface({ input, output });
+    try {
+        if (useInteractivePrompt) {
+            console.log("");
+            console.log(stylePromptText(UI_COPY.oauth.pastePrompt, "accent"));
+        }
+        const answer = useInteractivePrompt
+            ? await rl.question("◆  ")
+            : await new Promise((resolve, reject) => {
+                if (input.readableEnded || input.destroyed) {
+                    resolve(null);
+                    return;
+                }
+                let settled = false;
+                const handleInputClosed = () => {
+                    if (settled)
+                        return;
+                    settled = true;
+                    input.off("end", handleInputClosed);
+                    input.off("close", handleInputClosed);
+                    resolve(null);
+                };
+                const finish = (value) => {
+                    if (settled)
+                        return;
+                    settled = true;
+                    input.off("end", handleInputClosed);
+                    input.off("close", handleInputClosed);
+                    resolve(value);
+                };
+                const fail = (error) => {
+                    if (settled)
+                        return;
+                    settled = true;
+                    input.off("end", handleInputClosed);
+                    input.off("close", handleInputClosed);
+                    reject(error);
+                };
+                rl.question("")
+                    .then((value) => finish(value))
+                    .catch((error) => {
+                    if (isAbortError(error) || isReadlineClosedError(error)) {
+                        handleInputClosed();
+                        return;
+                    }
+                    fail(error);
+                });
+                input.once("end", handleInputClosed);
+                input.once("close", handleInputClosed);
+            });
+        if (answer === null) {
+            return null;
+        }
+        if (answer.includes("\u001b")) {
+            return null;
+        }
+        const normalized = answer.trim().toLowerCase();
+        if (normalized.length === 0 ||
+            normalized === "q" ||
+            normalized === "quit" ||
+            normalized === "cancel" ||
+            normalized === "back") {
+            return null;
+        }
+        const parsed = parseAuthorizationInput(answer);
+        if (!parsed.code)
+            return null;
+        if (parsed.state && parsed.state !== state)
+            return null;
+        return parsed.code;
+    }
+    catch (error) {
+        if (isAbortError(error) || isReadlineClosedError(error)) {
+            return null;
+        }
+        throw error;
+    }
+    finally {
+        rl.close();
+    }
+}
+function isReadlineClosedError(error) {
+    if (!(error instanceof Error)) {
+        return false;
+    }
+    const errorCode = typeof error === "object" && error !== null && "code" in error
+        ? String(error.code)
+        : "";
+    return (errorCode === "ERR_USE_AFTER_CLOSE" ||
+        /readline was closed/i.test(error.message));
+}
+export function formatBackupSavedAt(mtimeMs) {
+    return new Date(mtimeMs).toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+    });
+}
+async function promptOAuthSignInMode(backupOption, backupDiscoveryWarning = null) {
+    if (!input.isTTY || !output.isTTY) {
+        return "browser";
+    }
+    const ui = getUiRuntimeOptions();
+    const items = [
+        {
+            label: UI_COPY.oauth.signInHeading,
+            value: "cancel",
+            kind: "heading",
+        },
+        { label: UI_COPY.oauth.openBrowser, value: "browser", color: "green" },
+        { label: UI_COPY.oauth.manualMode, value: "manual", color: "yellow" },
+        ...(backupOption
+            ? [
+                { separator: true, label: "", value: "cancel" },
+                {
+                    label: UI_COPY.oauth.restoreHeading,
+                    value: "cancel",
+                    kind: "heading",
+                },
+                {
+                    label: UI_COPY.oauth.restoreSavedBackup,
+                    value: "restore-backup",
+                    hint: UI_COPY.oauth.loadLastBackupHint(backupOption.fileName, backupOption.accountCount, formatBackupSavedAt(backupOption.mtimeMs)),
+                    color: "cyan",
+                },
+            ]
+            : []),
+        { separator: true, label: "", value: "cancel" },
+        { label: UI_COPY.oauth.back, value: "cancel", color: "red" },
+    ];
+    const selected = await select(items, {
+        message: UI_COPY.oauth.chooseModeTitle,
+        subtitle: backupDiscoveryWarning
+            ? `${UI_COPY.oauth.chooseModeSubtitle} ${backupDiscoveryWarning}`
+            : UI_COPY.oauth.chooseModeSubtitle,
+        help: backupOption
+            ? UI_COPY.oauth.chooseModeHelpWithBackup
+            : UI_COPY.oauth.chooseModeHelp,
+        clearScreen: true,
+        theme: ui.theme,
+        selectedEmphasis: "minimal",
+        allowEscape: false,
+        onInput: (raw) => {
+            const lower = raw.toLowerCase();
+            if (lower === "q")
+                return "cancel";
+            if (lower === "1")
+                return "browser";
+            if (lower === "2")
+                return "manual";
+            if (lower === "3" && backupOption)
+                return "restore-backup";
+            return undefined;
+        },
+    });
+    return selected ?? "cancel";
+}
+async function promptBackupRestoreMode(latestBackup) {
+    if (!input.isTTY || !output.isTTY) {
+        return "latest";
+    }
+    const ui = getUiRuntimeOptions();
+    const items = [
+        {
+            label: UI_COPY.oauth.loadLastBackup,
+            value: "latest",
+            hint: `${UI_COPY.oauth.restoreBackupLatestHint}\n${UI_COPY.oauth.manualBackupHint(latestBackup.accountCount, formatBackupSavedAt(latestBackup.mtimeMs))}`,
+            color: "cyan",
+        },
+        {
+            label: UI_COPY.oauth.chooseBackupManually,
+            value: "manual",
+            color: "yellow",
+        },
+        { label: UI_COPY.oauth.back, value: "back", color: "red" },
+    ];
+    const selected = await select(items, {
+        message: UI_COPY.oauth.restoreBackupTitle,
+        subtitle: UI_COPY.oauth.restoreBackupSubtitle,
+        help: UI_COPY.oauth.restoreBackupHelp,
+        clearScreen: true,
+        theme: ui.theme,
+        selectedEmphasis: "minimal",
+        allowEscape: false,
+        onInput: (raw) => {
+            const lower = raw.toLowerCase();
+            if (lower === "q")
+                return "back";
+            if (lower === "1")
+                return "latest";
+            if (lower === "2")
+                return "manual";
+            return undefined;
+        },
+    });
+    return selected ?? "back";
+}
+async function promptManualBackupSelection(backups) {
+    if (!input.isTTY || !output.isTTY) {
+        return backups[0] ?? null;
+    }
+    const ui = getUiRuntimeOptions();
+    const items = backups.map((backup) => ({
+        label: backup.fileName,
+        value: backup,
+        hint: UI_COPY.oauth.manualBackupHint(backup.accountCount, formatBackupSavedAt(backup.mtimeMs)),
+        color: "cyan",
+    }));
+    items.push({ label: UI_COPY.oauth.back, value: null, color: "red" });
+    const selected = await select(items, {
+        message: UI_COPY.oauth.manualBackupTitle,
+        subtitle: UI_COPY.oauth.manualBackupSubtitle,
+        help: UI_COPY.oauth.manualBackupHelp,
+        clearScreen: true,
+        theme: ui.theme,
+        selectedEmphasis: "minimal",
+        allowEscape: false,
+        onInput: (raw) => {
+            if (raw.toLowerCase() === "q")
+                return null;
+            return undefined;
+        },
+    });
+    return selected;
+}
+async function waitForMenuReturn(options = {}) {
+    if (!input.isTTY || !output.isTTY) {
+        return;
+    }
+    const promptText = options.promptText ?? UI_COPY.returnFlow.continuePrompt;
+    const autoReturnMs = options.autoReturnMs ?? 0;
+    const pauseOnAnyKey = options.pauseOnAnyKey ?? true;
+    try {
+        let chunk;
+        do {
+            chunk = input.read();
+        } while (chunk !== null);
+    }
+    catch {
+        // best effort buffer drain
+    }
+    const writeInlineStatus = (message) => {
+        output.write(`\r${ANSI.clearLine}${stylePromptText(message, "muted")}`);
+    };
+    const clearInlineStatus = () => {
+        output.write(`\r${ANSI.clearLine}`);
+    };
+    if (autoReturnMs > 0) {
+        if (!pauseOnAnyKey) {
+            await new Promise((resolve) => setTimeout(resolve, autoReturnMs));
+            return;
+        }
+        const wasRaw = input.isRaw ?? false;
+        const endAt = Date.now() + autoReturnMs;
+        let lastShownSeconds = null;
+        const renderCountdown = () => {
+            const remainingMs = Math.max(0, endAt - Date.now());
+            const remainingSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+            if (lastShownSeconds === remainingSeconds)
+                return;
+            lastShownSeconds = remainingSeconds;
+            writeInlineStatus(UI_COPY.returnFlow.autoReturn(remainingSeconds));
+        };
+        renderCountdown();
+        const pinned = await new Promise((resolve) => {
+            let done = false;
+            const interval = setInterval(renderCountdown, 80);
+            let timeout = setTimeout(() => {
+                timeout = null;
+                if (!done) {
+                    done = true;
+                    cleanup();
+                    resolve(false);
+                }
+            }, autoReturnMs);
+            const onData = () => {
+                if (done)
+                    return;
+                done = true;
+                cleanup();
+                resolve(true);
+            };
+            const cleanup = () => {
+                clearInterval(interval);
+                if (timeout) {
+                    clearTimeout(timeout);
+                    timeout = null;
+                }
+                input.removeListener("data", onData);
+                try {
+                    input.setRawMode(wasRaw);
+                }
+                catch {
+                    // best effort restore
+                }
+            };
+            try {
+                input.setRawMode(true);
+            }
+            catch {
+                // if raw mode fails, keep countdown behavior
+            }
+            input.on("data", onData);
+            input.resume();
+        });
+        clearInlineStatus();
+        if (!pinned) {
+            return;
+        }
+        const paused = stylePromptText(UI_COPY.returnFlow.paused, "muted");
+        writeInlineStatus(paused);
+        await new Promise((resolve) => {
+            const wasRaw = input.isRaw ?? false;
+            const onData = () => {
+                cleanup();
+                resolve();
+            };
+            const cleanup = () => {
+                input.removeListener("data", onData);
+                try {
+                    input.setRawMode(wasRaw);
+                }
+                catch {
+                    // best effort restore
+                }
+            };
+            try {
+                input.setRawMode(true);
+            }
+            catch {
+                // best effort fallback
+            }
+            input.on("data", onData);
+            input.resume();
+        });
+        clearInlineStatus();
+        return;
+    }
+    const rl = createInterface({ input, output });
+    try {
+        const question = promptText.length > 0 ? `${stylePromptText(promptText, "muted")} ` : "";
+        output.write(`\r${ANSI.clearLine}`);
+        await rl.question(question);
+    }
+    catch (error) {
+        if (!isAbortError(error)) {
+            throw error;
+        }
+    }
+    finally {
+        rl.close();
+        clearInlineStatus();
+    }
+}
+function stringifyLogArgs(args) {
+    return args
+        .map((value) => {
+        if (typeof value === "string")
+            return value;
+        try {
+            return JSON.stringify(value);
+        }
+        catch {
+            return String(value);
+        }
+    })
+        .join(" ");
+}
+async function runActionPanel(title, stage, action, settings) {
+    if (!input.isTTY || !output.isTTY) {
+        await action();
+        return;
+    }
+    const spinnerFrames = ["-", "\\", "|", "/"];
+    let frame = 0;
+    let running = true;
+    let failed = null;
+    const captured = [];
+    const maxVisibleLines = Math.max(8, (output.rows ?? 24) - 8);
+    const previousLog = console.log;
+    const previousWarn = console.warn;
+    const previousError = console.error;
+    const capture = (prefix, args) => {
+        const line = stringifyLogArgs(args).trim();
+        if (!line)
+            return;
+        captured.push(prefix ? `${prefix}${line}` : line);
+        if (captured.length > 400) {
+            captured.splice(0, captured.length - 400);
+        }
+    };
+    const render = () => {
+        output.write(ANSI.clearScreen + ANSI.moveTo(1, 1));
+        const spinner = running
+            ? `${spinnerFrames[frame % spinnerFrames.length] ?? "-"} `
+            : failed
+                ? "x "
+                : "+ ";
+        const stageText = running
+            ? `${spinner}${stage}`
+            : failed
+                ? UI_COPY.returnFlow.failed
+                : UI_COPY.returnFlow.done;
+        previousLog(stylePromptText(title, "accent"));
+        previousLog(stylePromptText(stageText, failed ? "danger" : running ? "accent" : "success"));
+        previousLog("");
+        const lines = captured.slice(-maxVisibleLines);
+        for (const line of lines) {
+            previousLog(line);
+        }
+        const remainingLines = Math.max(0, maxVisibleLines - lines.length);
+        for (let i = 0; i < remainingLines; i += 1) {
+            previousLog("");
+        }
+        previousLog("");
+        if (running)
+            previousLog(stylePromptText(UI_COPY.returnFlow.working, "muted"));
+        frame += 1;
+    };
+    console.log = (...args) => {
+        capture("", args);
+    };
+    console.warn = (...args) => {
+        capture("! ", args);
+    };
+    console.error = (...args) => {
+        capture("x ", args);
+    };
+    output.write(ANSI.altScreenOn + ANSI.hide);
+    let timer = null;
+    try {
+        render();
+        timer = setInterval(() => {
+            if (!running)
+                return;
+            render();
+        }, 120);
+        await action();
+    }
+    catch (error) {
+        failed = error;
+        capture("x ", [error instanceof Error ? error.message : String(error)]);
+    }
+    finally {
+        running = false;
+        if (timer) {
+            clearInterval(timer);
+            timer = null;
+        }
+        render();
+        console.log = previousLog;
+        console.warn = previousWarn;
+        console.error = previousError;
+    }
+    if (failed) {
+        await waitForMenuReturn({
+            promptText: UI_COPY.returnFlow.actionFailedPrompt,
+        });
+    }
+    else {
+        await waitForMenuReturn({
+            autoReturnMs: settings?.actionAutoReturnMs ?? 2_000,
+            pauseOnAnyKey: settings?.actionPauseOnKey ?? true,
+        });
+    }
+    output.write(ANSI.altScreenOff + ANSI.show + ANSI.clearScreen + ANSI.moveTo(1, 1));
+    if (failed) {
+        throw failed;
+    }
+}
+async function runOAuthFlow(forceNewLogin, signInMode) {
+    const { pkce, state, url } = await createAuthorizationFlow({ forceNewLogin });
+    let code = null;
+    let oauthServer = null;
+    try {
+        if (signInMode === "browser") {
+            try {
+                oauthServer = await startLocalOAuthServer({ state });
+            }
+            catch (serverError) {
+                log.warn("Local OAuth callback server unavailable; falling back to manual callback entry.", serverError instanceof Error
+                    ? {
+                        message: serverError.message,
+                        stack: serverError.stack,
+                        code: typeof serverError === "object" &&
+                            serverError !== null &&
+                            "code" in serverError
+                            ? String(serverError.code)
+                            : undefined,
+                    }
+                    : { error: String(serverError) });
+                oauthServer = null;
+            }
+        }
+        if (signInMode === "browser") {
+            const opened = openBrowserUrl(url);
+            if (opened) {
+                console.log(stylePromptText(UI_COPY.oauth.browserOpened, "success"));
+            }
+            else {
+                console.log(stylePromptText(UI_COPY.oauth.browserOpenFail, "warning"));
+                console.log(`${stylePromptText(UI_COPY.oauth.goTo, "accent")} ${url}`);
+                const copied = copyTextToClipboard(url);
+                console.log(stylePromptText(copied ? UI_COPY.oauth.copyOk : UI_COPY.oauth.copyFail, copied ? "success" : "warning"));
+            }
+        }
+        else {
+            console.log(`${stylePromptText(UI_COPY.oauth.goTo, "accent")} ${url}`);
+            const copied = copyTextToClipboard(url);
+            console.log(stylePromptText(copied ? UI_COPY.oauth.copyOk : UI_COPY.oauth.copyFail, copied ? "success" : "warning"));
+        }
+        const waitingForCallback = signInMode === "browser" && oauthServer?.ready === true;
+        if (waitingForCallback && oauthServer) {
+            console.log(stylePromptText(UI_COPY.oauth.waitingCallback, "muted"));
+            const callbackResult = await oauthServer.waitForCode(state);
+            code = callbackResult?.code ?? null;
+        }
+        if (!code) {
+            console.log(stylePromptText(waitingForCallback
+                ? UI_COPY.oauth.callbackMissed
+                : signInMode === "manual"
+                    ? UI_COPY.oauth.callbackBypassed
+                    : UI_COPY.oauth.callbackUnavailable, "warning"));
+            code = await promptManualCallback(state, {
+                allowNonTty: signInMode === "manual",
+            });
+        }
+    }
+    finally {
+        oauthServer?.close();
+    }
+    if (!code) {
+        return {
+            type: "failed",
+            reason: "unknown",
+            message: UI_COPY.oauth.cancelled,
+        };
+    }
+    return exchangeAuthorizationCode(code, pkce.verifier, REDIRECT_URI);
+}
+async function persistAccountPool(results, replaceAll) {
+    if (results.length === 0)
+        return;
+    await withAccountStorageTransaction(async (loadedStorage, persist) => {
+        const stored = replaceAll ? null : loadedStorage;
+        const now = Date.now();
+        const accounts = stored?.accounts ? [...stored.accounts] : [];
+        let selectedAccountIndex = null;
+        for (const result of results) {
+            const tokenAccountId = extractAccountId(result.access);
+            const accountId = resolveRequestAccountId(result.accountIdOverride, result.accountIdSource, tokenAccountId);
+            const accountIdSource = accountId
+                ? (result.accountIdSource ??
+                    (result.accountIdOverride ? "manual" : "token"))
+                : undefined;
+            const accountLabel = result.accountLabel;
+            const accountEmail = sanitizeEmail(extractAccountEmail(result.access, result.idToken));
+            const existingIndex = findMatchingAccountIndex(accounts, {
+                accountId,
+                email: accountEmail,
+                refreshToken: result.refresh,
+            }, {
+                allowUniqueAccountIdFallbackWithoutEmail: true,
+            });
+            if (existingIndex === undefined) {
+                const newIndex = accounts.length;
+                accounts.push({
+                    accountId,
+                    accountIdSource,
+                    accountLabel,
+                    email: accountEmail,
+                    refreshToken: result.refresh,
+                    accessToken: result.access,
+                    expiresAt: result.expires,
+                    enabled: true,
+                    addedAt: now,
+                    lastUsed: now,
+                });
+                selectedAccountIndex = newIndex;
+                continue;
+            }
+            const existing = accounts[existingIndex];
+            if (!existing)
+                continue;
+            const nextEmail = accountEmail ?? existing.email;
+            const nextAccountId = accountId ?? existing.accountId;
+            const nextAccountIdSource = accountId
+                ? (accountIdSource ?? existing.accountIdSource)
+                : existing.accountIdSource;
+            accounts[existingIndex] = {
+                ...existing,
+                accountId: nextAccountId,
+                accountIdSource: nextAccountIdSource,
+                accountLabel: accountLabel ?? existing.accountLabel,
+                email: nextEmail,
+                refreshToken: result.refresh,
+                accessToken: result.access,
+                expiresAt: result.expires,
+                enabled: true,
+                lastUsed: now,
+            };
+            selectedAccountIndex = existingIndex;
+        }
+        const fallbackActiveIndex = accounts.length === 0
+            ? 0
+            : Math.max(0, Math.min(stored?.activeIndex ?? 0, accounts.length - 1));
+        const nextActiveIndex = accounts.length === 0
+            ? 0
+            : selectedAccountIndex === null
+                ? fallbackActiveIndex
+                : Math.max(0, Math.min(selectedAccountIndex, accounts.length - 1));
+        const activeIndexByFamily = {};
+        for (const family of MODEL_FAMILIES) {
+            activeIndexByFamily[family] = nextActiveIndex;
+        }
+        await persist({
+            version: 3,
+            accounts,
+            activeIndex: nextActiveIndex,
+            activeIndexByFamily,
+        });
+    });
+}
+async function syncSelectionToCodex(tokens) {
+    const tokenAccountId = extractAccountId(tokens.access);
+    const accountId = resolveRequestAccountId(tokens.accountIdOverride, tokens.accountIdSource, tokenAccountId);
+    const email = sanitizeEmail(extractAccountEmail(tokens.access, tokens.idToken));
+    await setCodexCliActiveSelection({
+        accountId,
+        email,
+        accessToken: tokens.access,
+        refreshToken: tokens.refresh,
+        expiresAt: tokens.expires,
+        idToken: tokens.idToken,
+    });
+}
+async function runHealthCheck(options = {}) {
+    const forceRefresh = options.forceRefresh === true;
+    const liveProbe = options.liveProbe === true;
+    const probeModel = options.model?.trim() || "gpt-5-codex";
+    const modelInspection = inspectRequestedModel(probeModel);
+    const display = options.display ?? DEFAULT_DASHBOARD_DISPLAY_SETTINGS;
+    const quotaCache = liveProbe ? await loadQuotaCache() : null;
+    const workingQuotaCache = quotaCache ? cloneQuotaCacheData(quotaCache) : null;
+    let quotaCacheChanged = false;
+    setStoragePath(null);
+    const storage = await loadAccounts();
+    if (!storage || storage.accounts.length === 0) {
+        console.log("No accounts configured.");
+        return;
+    }
+    let quotaEmailFallbackState = liveProbe && quotaCache
+        ? buildQuotaEmailFallbackState(storage.accounts)
+        : null;
+    let changed = false;
+    let ok = 0;
+    let failed = 0;
+    let warnings = 0;
+    const activeIndex = resolveActiveIndex(storage, "codex");
+    let activeAccountRefreshed = false;
+    const now = Date.now();
+    console.log(stylePromptText(forceRefresh
+        ? `Checking ${storage.accounts.length} account(s) with full refresh test...`
+        : `Checking ${storage.accounts.length} account(s) with quick check${liveProbe ? " + live check" : ""}...`, "accent"));
+    if (liveProbe) {
+        console.log(stylePromptText(`Model probe: ${formatModelInspection(modelInspection)}`, "muted"));
+    }
+    for (let i = 0; i < storage.accounts.length; i += 1) {
+        const account = storage.accounts[i];
+        if (!account)
+            continue;
+        const label = formatAccountLabel(account, i);
+        const labelText = stylePromptText(label, "accent");
+        const sessionLikelyValid = hasUsableAccessToken(account, now);
+        if (!forceRefresh && sessionLikelyValid) {
+            if (account.enabled === false) {
+                account.enabled = true;
+                changed = true;
+            }
+            if (i === activeIndex) {
+                activeAccountRefreshed = true;
+            }
+            let healthDetail = "signed in and working";
+            if (liveProbe) {
+                const currentAccessToken = account.accessToken;
+                const probeAccountId = currentAccessToken
+                    ? (account.accountId ?? extractAccountId(currentAccessToken))
+                    : undefined;
+                if (!probeAccountId || !currentAccessToken) {
+                    warnings += 1;
+                    healthDetail =
+                        "signed in and working (live check skipped: missing account ID)";
+                }
+                else {
+                    try {
+                        const snapshot = await fetchCodexQuotaSnapshot({
+                            accountId: probeAccountId,
+                            accessToken: currentAccessToken,
+                            model: modelInspection.normalized,
+                        });
+                        if (workingQuotaCache) {
+                            quotaCacheChanged =
+                                updateQuotaCacheForAccount(workingQuotaCache, account, snapshot, storage.accounts, quotaEmailFallbackState ?? undefined) || quotaCacheChanged;
+                        }
+                        healthDetail = formatQuotaSnapshotForDashboard(snapshot, display);
+                    }
+                    catch (error) {
+                        const message = normalizeFailureDetail(error instanceof Error ? error.message : String(error), undefined);
+                        warnings += 1;
+                        healthDetail = `signed in and working (live check failed: ${message})`;
+                    }
+                }
+            }
+            if (hasLikelyInvalidRefreshToken(account.refreshToken)) {
+                healthDetail += " (re-login suggested soon)";
+            }
+            ok += 1;
+            if (display.showPerAccountRows) {
+                console.log(`  ${stylePromptText("✓", "success")} ${labelText} ${stylePromptText("|", "muted")} ${styleAccountDetailText(healthDetail)}`);
+            }
+            continue;
+        }
+        const result = await queuedRefresh(account.refreshToken);
+        if (result.type === "success") {
+            const tokenAccountId = extractAccountId(result.access);
+            const nextEmail = sanitizeEmail(extractAccountEmail(result.access, result.idToken));
+            const previousEmail = account.email;
+            let accountIdentityChanged = false;
+            if (account.refreshToken !== result.refresh) {
+                account.refreshToken = result.refresh;
+                changed = true;
+            }
+            if (account.accessToken !== result.access) {
+                account.accessToken = result.access;
+                changed = true;
+            }
+            if (account.expiresAt !== result.expires) {
+                account.expiresAt = result.expires;
+                changed = true;
+            }
+            if (nextEmail && nextEmail !== account.email) {
+                account.email = nextEmail;
+                changed = true;
+                accountIdentityChanged = true;
+            }
+            if (applyTokenAccountIdentity(account, tokenAccountId)) {
+                changed = true;
+                accountIdentityChanged = true;
+            }
+            if (account.enabled === false) {
+                account.enabled = true;
+                changed = true;
+            }
+            if (accountIdentityChanged && liveProbe && workingQuotaCache) {
+                quotaEmailFallbackState = buildQuotaEmailFallbackState(storage.accounts);
+                quotaCacheChanged =
+                    pruneUnsafeQuotaEmailCacheEntry(workingQuotaCache, previousEmail, storage.accounts, quotaEmailFallbackState) || quotaCacheChanged;
+            }
+            account.lastUsed = Date.now();
+            if (i === activeIndex) {
+                activeAccountRefreshed = true;
+            }
+            ok += 1;
+            let healthyMessage = "working now";
+            if (liveProbe) {
+                const probeAccountId = account.accountId ?? tokenAccountId;
+                if (!probeAccountId) {
+                    warnings += 1;
+                    healthyMessage =
+                        "working now (live check skipped: missing account ID)";
+                }
+                else {
+                    try {
+                        const snapshot = await fetchCodexQuotaSnapshot({
+                            accountId: probeAccountId,
+                            accessToken: result.access,
+                            model: modelInspection.normalized,
+                        });
+                        if (workingQuotaCache) {
+                            quotaCacheChanged =
+                                updateQuotaCacheForAccount(workingQuotaCache, account, snapshot, storage.accounts, quotaEmailFallbackState ?? undefined) || quotaCacheChanged;
+                        }
+                        healthyMessage = formatQuotaSnapshotForDashboard(snapshot, display);
+                    }
+                    catch (error) {
+                        const message = normalizeFailureDetail(error instanceof Error ? error.message : String(error), undefined);
+                        warnings += 1;
+                        healthyMessage = `working now (live check failed: ${message})`;
+                    }
+                }
+            }
+            if (display.showPerAccountRows) {
+                console.log(`  ${stylePromptText("✓", "success")} ${labelText} ${stylePromptText("|", "muted")} ${styleAccountDetailText(healthyMessage)}`);
+            }
+        }
+        else {
+            const detail = normalizeFailureDetail(result.message, result.reason);
+            if (sessionLikelyValid) {
+                warnings += 1;
+                if (display.showPerAccountRows) {
+                    console.log(`  ${stylePromptText("!", "warning")} ${labelText} ${stylePromptText("|", "muted")} ${stylePromptText(`refresh failed (${detail}) but this account still works right now`, "warning")}`);
+                }
+            }
+            else {
+                failed += 1;
+                if (display.showPerAccountRows) {
+                    console.log(`  ${stylePromptText("✗", "danger")} ${labelText} ${stylePromptText("|", "muted")} ${stylePromptText(detail, "danger")}`);
+                }
+            }
+        }
+    }
+    if (!display.showPerAccountRows) {
+        console.log(stylePromptText("Per-account lines are hidden in dashboard settings.", "muted"));
+    }
+    if (workingQuotaCache && quotaCacheChanged) {
+        await saveQuotaCache(workingQuotaCache);
+    }
+    if (changed) {
+        await saveAccounts(storage);
+    }
+    if (activeAccountRefreshed &&
+        activeIndex >= 0 &&
+        activeIndex < storage.accounts.length) {
+        const activeAccount = storage.accounts[activeIndex];
+        if (activeAccount) {
+            await setCodexCliActiveSelection({
+                accountId: activeAccount.accountId,
+                email: activeAccount.email,
+                accessToken: activeAccount.accessToken,
+                refreshToken: activeAccount.refreshToken,
+                expiresAt: activeAccount.expiresAt,
+            });
+        }
+    }
+    console.log("");
+    console.log(formatResultSummary([
+        { text: `${ok} working`, tone: "success" },
+        {
+            text: `${failed} need re-login`,
+            tone: failed > 0 ? "danger" : "muted",
+        },
+        {
+            text: `${warnings} warning${warnings === 1 ? "" : "s"}`,
+            tone: warnings > 0 ? "warning" : "muted",
+        },
+    ]));
+}
+function printBestUsage() {
+    console.log([
+        "Usage:",
+        "  codex auth best [--live] [--json] [--model <model>]",
+        "",
+        "Options:",
+        "  --live, -l         Probe live quota headers via Codex backend before switching",
+        "  --json, -j         Print machine-readable JSON output",
+        "  --model, -m        Probe model for live mode (default: gpt-5-codex)",
+        "",
+        "Behavior:",
+        "  - Chooses the healthiest account using forecast scoring",
+        "  - Switches to the recommended account when it is not already active",
+    ].join("\n"));
+}
+function parseBestArgs(args) {
+    const options = {
+        live: false,
+        json: false,
+        model: "gpt-5-codex",
+        modelProvided: false,
+    };
+    for (let i = 0; i < args.length; i += 1) {
+        const arg = args[i];
+        if (!arg)
+            continue;
+        if (arg === "--live" || arg === "-l") {
+            options.live = true;
+            continue;
+        }
+        if (arg === "--json" || arg === "-j") {
+            options.json = true;
+            continue;
+        }
+        if (arg === "--model" || arg === "-m") {
+            const value = args[i + 1];
+            if (!value) {
+                return { ok: false, message: "Missing value for --model" };
+            }
+            options.model = value;
+            options.modelProvided = true;
+            i += 1;
+            continue;
+        }
+        if (arg.startsWith("--model=")) {
+            const value = arg.slice("--model=".length).trim();
+            if (!value) {
+                return { ok: false, message: "Missing value for --model" };
+            }
+            options.model = value;
+            options.modelProvided = true;
+            continue;
+        }
+        return { ok: false, message: `Unknown option: ${arg}` };
+    }
+    return { ok: true, options };
+}
+async function runForecast(args) {
+    return runForecastCommand(args, {
+        setStoragePath,
+        loadAccounts,
+        loadDashboardDisplaySettings,
+        resolveActiveIndex,
+        loadQuotaCache,
+        saveQuotaCache,
+        cloneQuotaCacheData,
+        buildQuotaEmailFallbackState,
+        updateQuotaCacheForAccount,
+        hasUsableAccessToken,
+        queuedRefresh,
+        fetchCodexQuotaSnapshot,
+        normalizeFailureDetail,
+        formatAccountLabel,
+        extractAccountId,
+        evaluateForecastAccounts,
+        summarizeForecast,
+        recommendForecastAccount,
+        stylePromptText,
+        formatResultSummary,
+        styleQuotaSummary,
+        formatCompactQuotaSnapshot,
+        availabilityTone,
+        riskTone,
+        formatWaitTime,
+        defaultDisplay: DEFAULT_DASHBOARD_DISPLAY_SETTINGS,
+        formatQuotaSnapshotLine,
+    });
+}
+async function clearAccountsAndReset() {
+    await clearAccounts();
+}
+function adjustManageActionSelectionIndex(currentIndex, removedIndex, remainingCount) {
+    if (remainingCount <= 0) {
+        return 0;
+    }
+    if (typeof currentIndex !== "number" || currentIndex < 0) {
+        return 0;
+    }
+    if (currentIndex < removedIndex) {
+        return Math.min(currentIndex, remainingCount - 1);
+    }
+    if (currentIndex > removedIndex) {
+        return currentIndex - 1;
+    }
+    return Math.min(removedIndex, remainingCount - 1);
+}
+function resetManageActionSelection(storage, removedIndex) {
+    const remainingCount = storage.accounts.length;
+    if (remainingCount <= 0) {
+        storage.activeIndex = 0;
+        storage.activeIndexByFamily = {};
+        for (const family of MODEL_FAMILIES) {
+            storage.activeIndexByFamily[family] = 0;
+        }
+        return;
+    }
+    const previousActiveIndex = storage.activeIndex;
+    const previousByFamily = { ...storage.activeIndexByFamily };
+    storage.activeIndex = adjustManageActionSelectionIndex(previousActiveIndex, removedIndex, remainingCount);
+    storage.activeIndexByFamily = {};
+    for (const family of MODEL_FAMILIES) {
+        storage.activeIndexByFamily[family] = adjustManageActionSelectionIndex(previousByFamily[family] ?? previousActiveIndex, removedIndex, remainingCount);
+    }
+}
+function replaceManageActionStorage(target, source) {
+    target.version = source.version;
+    target.accounts = structuredClone(source.accounts);
+    target.activeIndex = source.activeIndex;
+    target.activeIndexByFamily = {
+        ...source.activeIndexByFamily,
+    };
+}
+function resolveManageActionAccountIndex(storage, fallbackIndex, account) {
+    if (account) {
+        const matchedIndex = findMatchingAccountIndex(storage.accounts, {
+            accountId: account.accountId,
+            email: account.email,
+            refreshToken: account.refreshToken,
+        }, {
+            allowUniqueAccountIdFallbackWithoutEmail: true,
+        });
+        if (typeof matchedIndex === "number" && matchedIndex >= 0) {
+            return matchedIndex;
+        }
+        return null;
+    }
+    return fallbackIndex >= 0 && fallbackIndex < storage.accounts.length
+        ? fallbackIndex
+        : null;
+}
+function matchesManageActionAccount(account, candidate) {
+    if (!account || !candidate) {
+        return false;
+    }
+    if (account.accountId || candidate.accountId) {
+        return account.accountId === candidate.accountId;
+    }
+    return (account.refreshToken === candidate.refreshToken
+        && sanitizeEmail(account.email) === sanitizeEmail(candidate.email));
+}
+async function handleManageAction(storage, menuResult) {
+    if (typeof menuResult.switchAccountIndex === "number") {
+        const index = menuResult.switchAccountIndex;
+        await runSwitchCommand([String(index + 1)], {
+            setStoragePath,
+            loadAccounts,
+            persistAndSyncSelectedAccount,
+        });
+        return;
+    }
+    if (typeof menuResult.deleteAccountIndex === "number") {
+        const idx = menuResult.deleteAccountIndex;
+        const selectedAccount = storage.accounts[idx];
+        let deleted = false;
+        if (selectedAccount) {
+            await withAccountStorageTransaction(async (loadedStorage, persist) => {
+                const nextStorage = loadedStorage
+                    ? structuredClone(loadedStorage)
+                    : structuredClone(storage);
+                const nextIndex = resolveManageActionAccountIndex(nextStorage, idx, selectedAccount);
+                if (nextIndex === null) {
+                    return;
+                }
+                const nextAccount = nextStorage.accounts[nextIndex];
+                if (!matchesManageActionAccount(selectedAccount, nextAccount)) {
+                    return;
+                }
+                nextStorage.accounts.splice(nextIndex, 1);
+                resetManageActionSelection(nextStorage, nextIndex);
+                await persist(nextStorage);
+                replaceManageActionStorage(storage, nextStorage);
+                deleted = true;
+            });
+        }
+        if (deleted) {
+            console.log(`Deleted account ${idx + 1}.`);
+        }
+        return;
+    }
+    if (typeof menuResult.toggleAccountIndex === "number") {
+        const idx = menuResult.toggleAccountIndex;
+        const selectedAccount = storage.accounts[idx];
+        let nextEnabledState = null;
+        if (selectedAccount) {
+            await withAccountStorageTransaction(async (loadedStorage, persist) => {
+                const nextStorage = loadedStorage
+                    ? structuredClone(loadedStorage)
+                    : structuredClone(storage);
+                const nextIndex = resolveManageActionAccountIndex(nextStorage, idx, selectedAccount);
+                if (nextIndex === null) {
+                    return;
+                }
+                const nextAccount = nextStorage.accounts[nextIndex];
+                if (!nextAccount || !matchesManageActionAccount(selectedAccount, nextAccount)) {
+                    return;
+                }
+                nextAccount.enabled = nextAccount.enabled === false;
+                await persist(nextStorage);
+                replaceManageActionStorage(storage, nextStorage);
+                nextEnabledState = nextAccount.enabled !== false;
+            });
+        }
+        if (nextEnabledState !== null) {
+            console.log(`${nextEnabledState ? "Enabled" : "Disabled"} account ${idx + 1}.`);
+        }
+        return;
+    }
+    if (typeof menuResult.refreshAccountIndex === "number") {
+        const idx = menuResult.refreshAccountIndex;
+        const existing = storage.accounts[idx];
+        if (!existing)
+            return;
+        const signInMode = await promptOAuthSignInMode(null);
+        if (signInMode === "cancel") {
+            console.log(stylePromptText(UI_COPY.oauth.cancelledBackToMenu, "muted"));
+            return;
+        }
+        if (signInMode !== "browser" && signInMode !== "manual") {
+            return;
+        }
+        const tokenResult = await runOAuthFlow(true, signInMode);
+        if (tokenResult.type !== "success") {
+            console.error(`Refresh failed: ${tokenResult.message ?? tokenResult.reason ?? "unknown error"}`);
+            return;
+        }
+        const resolved = resolveAccountSelection(tokenResult);
+        await persistAccountPool([resolved], false);
+        await syncSelectionToCodex(resolved);
+        console.log(`Refreshed account ${idx + 1}.`);
+    }
+}
+async function runAuthLogin(args) {
+    const parsedArgs = parseAuthLoginArgs(args);
+    if (!parsedArgs.ok) {
+        if (parsedArgs.reason === "error") {
+            console.error(parsedArgs.message);
+            printUsage();
+            return 1;
+        }
+        return 0;
+    }
+    const loginOptions = parsedArgs.options;
+    setStoragePath(null);
+    let pendingMenuQuotaRefresh = null;
+    let menuQuotaRefreshStatus;
+    loginFlow: while (true) {
+        let existingStorage = await loadAccounts();
+        if (existingStorage && existingStorage.accounts.length > 0) {
+            while (true) {
+                existingStorage = await loadAccounts();
+                if (!existingStorage || existingStorage.accounts.length === 0) {
+                    break;
+                }
+                const currentStorage = existingStorage;
+                const displaySettings = await loadDashboardDisplaySettings();
+                applyUiThemeFromDashboardSettings(displaySettings);
+                const quotaCache = await loadQuotaCache();
+                const shouldAutoFetchLimits = displaySettings.menuAutoFetchLimits ?? true;
+                const showFetchStatus = displaySettings.menuShowFetchStatus ?? true;
+                const quotaTtlMs = displaySettings.menuQuotaTtlMs ?? DEFAULT_MENU_QUOTA_REFRESH_TTL_MS;
+                if (shouldAutoFetchLimits && !pendingMenuQuotaRefresh) {
+                    const staleCount = countMenuQuotaRefreshTargets(currentStorage, quotaCache, quotaTtlMs);
+                    if (staleCount > 0) {
+                        if (showFetchStatus) {
+                            menuQuotaRefreshStatus = `${UI_COPY.mainMenu.loadingLimits} [0/${staleCount}]`;
+                        }
+                        pendingMenuQuotaRefresh = refreshQuotaCacheForMenu(currentStorage, quotaCache, quotaTtlMs, (current, total) => {
+                            if (!showFetchStatus)
+                                return;
+                            menuQuotaRefreshStatus = `${UI_COPY.mainMenu.loadingLimits} [${current}/${total}]`;
+                        })
+                            .then(() => undefined)
+                            .catch(() => undefined)
+                            .finally(() => {
+                            menuQuotaRefreshStatus = undefined;
+                            pendingMenuQuotaRefresh = null;
+                        });
+                    }
+                }
+                const flaggedStorage = await loadFlaggedAccounts();
+                const menuResult = await promptLoginMode(toExistingAccountInfo(currentStorage, quotaCache, displaySettings), {
+                    flaggedCount: flaggedStorage.accounts.length,
+                    statusMessage: showFetchStatus
+                        ? () => menuQuotaRefreshStatus
+                        : undefined,
+                });
+                if (menuResult.mode === "cancel") {
+                    console.log("Cancelled.");
+                    return 0;
+                }
+                if (menuResult.mode === "check") {
+                    await runActionPanel("Quick Check", "Checking local session + live status", async () => {
+                        await runHealthCheck({ forceRefresh: false, liveProbe: true });
+                    }, displaySettings);
+                    continue;
+                }
+                if (menuResult.mode === "deep-check") {
+                    await runActionPanel("Deep Check", "Refreshing and testing all accounts", async () => {
+                        await runHealthCheck({ forceRefresh: true, liveProbe: true });
+                    }, displaySettings);
+                    continue;
+                }
+                if (menuResult.mode === "forecast") {
+                    await runActionPanel("Best Account", "Comparing accounts", async () => {
+                        await runForecast(["--live"]);
+                    }, displaySettings);
+                    continue;
+                }
+                if (menuResult.mode === "fix") {
+                    await runActionPanel("Auto-Fix", "Checking and fixing common issues", async () => {
+                        await runRepairFix(["--live"], createRepairCommandDeps());
+                    }, displaySettings);
+                    continue;
+                }
+                if (menuResult.mode === "settings") {
+                    await configureUnifiedSettings(displaySettings);
+                    continue;
+                }
+                if (menuResult.mode === "verify-flagged") {
+                    await runActionPanel("Problem Account Check", "Checking problem accounts", async () => {
+                        await runRepairVerifyFlagged([], createRepairCommandDeps());
+                    }, displaySettings);
+                    continue;
+                }
+                if (menuResult.mode === "fresh" && menuResult.deleteAll) {
+                    await runActionPanel("Reset Accounts", "Deleting all saved accounts", async () => {
+                        await clearAccountsAndReset();
+                        console.log("Cleared saved accounts from active storage. Recovery snapshots remain available.");
+                    }, displaySettings);
+                    continue;
+                }
+                if (menuResult.mode === "manage") {
+                    const requiresInteractiveOAuth = typeof menuResult.refreshAccountIndex === "number";
+                    if (requiresInteractiveOAuth) {
+                        await handleManageAction(currentStorage, menuResult);
+                        continue;
+                    }
+                    await runActionPanel("Applying Change", "Updating selected account", async () => {
+                        await handleManageAction(currentStorage, menuResult);
+                    }, displaySettings);
+                    continue;
+                }
+                if (menuResult.mode === "add") {
+                    break;
+                }
+            }
+        }
+        const refreshedStorage = await loadAccounts();
+        let existingCount = refreshedStorage?.accounts.length ?? 0;
+        let forceNewLogin = existingCount > 0;
+        let onboardingBackupDiscoveryWarning = null;
+        const loadNamedBackupsForOnboarding = async () => {
+            if (existingCount > 0) {
+                onboardingBackupDiscoveryWarning = null;
+                return [];
+            }
+            try {
+                onboardingBackupDiscoveryWarning = null;
+                return await getNamedBackups();
+            }
+            catch (error) {
+                const code = error.code;
+                log.debug("getNamedBackups failed, skipping restore option", {
+                    code,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+                if (code && code !== "ENOENT") {
+                    onboardingBackupDiscoveryWarning =
+                        "Named backup discovery failed. Continuing with browser or manual sign-in only.";
+                    console.warn(onboardingBackupDiscoveryWarning);
+                }
+                else {
+                    onboardingBackupDiscoveryWarning = null;
+                }
+                return [];
+            }
+        };
+        let namedBackups = await loadNamedBackupsForOnboarding();
+        while (true) {
+            const latestNamedBackup = namedBackups[0] ?? null;
+            const preferManualMode = loginOptions.manual || isBrowserLaunchSuppressed();
+            const signInMode = preferManualMode
+                ? "manual"
+                : await promptOAuthSignInMode(latestNamedBackup, onboardingBackupDiscoveryWarning);
+            if (signInMode === "cancel") {
+                if (existingCount > 0) {
+                    console.log(stylePromptText(UI_COPY.oauth.cancelledBackToMenu, "muted"));
+                    continue loginFlow;
+                }
+                console.log("Cancelled.");
+                return 0;
+            }
+            if (signInMode === "restore-backup") {
+                const latestAvailableBackup = namedBackups[0] ?? null;
+                if (!latestAvailableBackup) {
+                    namedBackups = await loadNamedBackupsForOnboarding();
+                    continue;
+                }
+                const restoreMode = await promptBackupRestoreMode(latestAvailableBackup);
+                if (restoreMode === "back") {
+                    namedBackups = await loadNamedBackupsForOnboarding();
+                    continue;
+                }
+                const selectedBackup = restoreMode === "manual"
+                    ? await promptManualBackupSelection(namedBackups)
+                    : latestAvailableBackup;
+                if (!selectedBackup) {
+                    namedBackups = await loadNamedBackupsForOnboarding();
+                    continue;
+                }
+                const confirmed = await confirm(UI_COPY.oauth.restoreBackupConfirm(selectedBackup.fileName, selectedBackup.accountCount));
+                if (!confirmed) {
+                    namedBackups = await loadNamedBackupsForOnboarding();
+                    continue;
+                }
+                const displaySettings = await loadDashboardDisplaySettings();
+                applyUiThemeFromDashboardSettings(displaySettings);
+                try {
+                    await runActionPanel("Load Backup", `Loading ${selectedBackup.fileName}`, async () => {
+                        const restoredStorage = await restoreAccountsFromBackup(selectedBackup.path, { persist: false });
+                        const targetIndex = resolveActiveIndex(restoredStorage);
+                        const { synced } = await persistAndSyncSelectedAccount({
+                            storage: restoredStorage,
+                            targetIndex,
+                            parsed: targetIndex + 1,
+                            switchReason: "restore",
+                            preserveActiveIndexByFamily: true,
+                        });
+                        console.log(UI_COPY.oauth.restoreBackupLoaded(selectedBackup.fileName, restoredStorage.accounts.length));
+                        if (!synced) {
+                            console.warn(UI_COPY.oauth.restoreBackupSyncWarning);
+                        }
+                    }, displaySettings);
+                }
+                catch (error) {
+                    const message = error instanceof Error ? error.message : String(error);
+                    if (error instanceof StorageError) {
+                        console.error(formatStorageErrorHint(error, selectedBackup.path));
+                    }
+                    else {
+                        console.error(`Backup restore failed: ${message}`);
+                    }
+                    const storageAfterRestoreAttempt = await loadAccounts().catch(() => null);
+                    if ((storageAfterRestoreAttempt?.accounts.length ?? 0) > 0) {
+                        continue loginFlow;
+                    }
+                    namedBackups = await loadNamedBackupsForOnboarding();
+                    continue;
+                }
+                continue loginFlow;
+            }
+            if (signInMode !== "browser" && signInMode !== "manual") {
+                continue;
+            }
+            const tokenResult = await runOAuthFlow(forceNewLogin, signInMode);
+            if (tokenResult.type !== "success") {
+                if (isOAuthCancellation(tokenResult)) {
+                    if (existingCount > 0) {
+                        console.log(stylePromptText(UI_COPY.oauth.cancelledBackToMenu, "muted"));
+                        continue loginFlow;
+                    }
+                    console.log("Cancelled.");
+                    return 0;
+                }
+                console.error(`Login failed: ${tokenResult.message ?? tokenResult.reason ?? "unknown error"}`);
+                return 1;
+            }
+            const resolved = resolveAccountSelection(tokenResult);
+            await persistAccountPool([resolved], false);
+            await syncSelectionToCodex(resolved);
+            const latestStorage = await loadAccounts();
+            const count = latestStorage?.accounts.length ?? 1;
+            existingCount = count;
+            namedBackups = [];
+            onboardingBackupDiscoveryWarning = null;
+            console.log(`Added account. Total: ${count}`);
+            console.log("Next steps:");
+            console.log("  codex auth status  Check that the wrapper is active.");
+            console.log("  codex auth check   Confirm your saved accounts look healthy.");
+            console.log("  codex auth list    Review saved accounts before switching.");
+            if (count >= ACCOUNT_LIMITS.MAX_ACCOUNTS) {
+                console.log(`Reached maximum account limit (${ACCOUNT_LIMITS.MAX_ACCOUNTS}).`);
+                break;
+            }
+            const addAnother = await promptAddAnotherAccount(count);
+            if (!addAnother)
+                break;
+            forceNewLogin = true;
+        }
+    }
+}
+async function persistAndSyncSelectedAccount({ storage, targetIndex, parsed, switchReason, initialSyncIdToken, preserveActiveIndexByFamily = false, }) {
+    const account = storage.accounts[targetIndex];
+    if (!account) {
+        throw new Error(`Account ${parsed} not found.`);
+    }
+    const shouldPreserveActiveIndexByFamily = preserveActiveIndexByFamily &&
+        !!storage.activeIndexByFamily &&
+        targetIndex === storage.activeIndex;
+    storage.activeIndex = targetIndex;
+    storage.activeIndexByFamily = storage.activeIndexByFamily ?? {};
+    if (shouldPreserveActiveIndexByFamily) {
+        const maxIndex = Math.max(0, storage.accounts.length - 1);
+        for (const family of MODEL_FAMILIES) {
+            const raw = storage.activeIndexByFamily[family];
+            const candidate = typeof raw === "number" && Number.isFinite(raw) ? raw : targetIndex;
+            storage.activeIndexByFamily[family] = Math.max(0, Math.min(candidate, maxIndex));
+        }
+    }
+    else {
+        storage.activeIndexByFamily = storage.activeIndexByFamily ?? {};
+        for (const family of MODEL_FAMILIES) {
+            storage.activeIndexByFamily[family] = targetIndex;
+        }
+    }
+    const wasDisabled = account.enabled === false;
+    if (wasDisabled) {
+        account.enabled = true;
+    }
+    const switchNow = Date.now();
+    let syncAccessToken = account.accessToken;
+    let syncRefreshToken = account.refreshToken;
+    let syncExpiresAt = account.expiresAt;
+    let syncIdToken = initialSyncIdToken;
+    if (!hasUsableAccessToken(account, switchNow)) {
+        const refreshResult = await queuedRefresh(account.refreshToken);
+        if (refreshResult.type === "success") {
+            const tokenAccountId = extractAccountId(refreshResult.access);
+            const nextEmail = sanitizeEmail(extractAccountEmail(refreshResult.access, refreshResult.idToken));
+            if (account.refreshToken !== refreshResult.refresh) {
+                account.refreshToken = refreshResult.refresh;
+            }
+            if (account.accessToken !== refreshResult.access) {
+                account.accessToken = refreshResult.access;
+            }
+            if (account.expiresAt !== refreshResult.expires) {
+                account.expiresAt = refreshResult.expires;
+            }
+            if (nextEmail && nextEmail !== account.email) {
+                account.email = nextEmail;
+            }
+            applyTokenAccountIdentity(account, tokenAccountId);
+            syncAccessToken = refreshResult.access;
+            syncRefreshToken = refreshResult.refresh;
+            syncExpiresAt = refreshResult.expires;
+            syncIdToken = refreshResult.idToken;
+        }
+        else {
+            console.warn(`Switch validation refresh failed for account ${parsed}: ${normalizeFailureDetail(refreshResult.message, refreshResult.reason)}.`);
+        }
+    }
+    account.lastUsed = switchNow;
+    account.lastSwitchReason = switchReason;
+    await saveAccounts(storage);
+    const synced = await setCodexCliActiveSelection({
+        accountId: account.accountId,
+        email: account.email,
+        accessToken: syncAccessToken,
+        refreshToken: syncRefreshToken,
+        expiresAt: syncExpiresAt,
+        ...(syncIdToken ? { idToken: syncIdToken } : {}),
+    });
+    return { synced, wasDisabled };
+}
+async function runBest(args) {
+    return runBestCommand(args, {
+        setStoragePath,
+        loadAccounts,
+        saveAccounts,
+        parseBestArgs,
+        printBestUsage,
+        resolveActiveIndex,
+        hasUsableAccessToken,
+        queuedRefresh,
+        normalizeFailureDetail,
+        extractAccountId,
+        extractAccountEmail,
+        sanitizeEmail,
+        formatAccountLabel,
+        fetchCodexQuotaSnapshot,
+        evaluateForecastAccounts,
+        recommendForecastAccount,
+        persistAndSyncSelectedAccount,
+        setCodexCliActiveSelection,
+    });
+}
+export async function autoSyncActiveAccountToCodex() {
+    setStoragePath(null);
+    const storage = await loadAccounts();
+    if (!storage || storage.accounts.length === 0) {
+        return false;
+    }
+    const activeIndex = resolveActiveIndex(storage, "codex");
+    if (activeIndex < 0 || activeIndex >= storage.accounts.length) {
+        return false;
+    }
+    const account = storage.accounts[activeIndex];
+    if (!account) {
+        return false;
+    }
+    const accountMatch = {
+        accountId: account.accountId,
+        email: account.email,
+        refreshToken: account.refreshToken,
+    };
+    const now = Date.now();
+    let syncAccessToken = account.accessToken;
+    let syncRefreshToken = account.refreshToken;
+    let syncExpiresAt = account.expiresAt;
+    let syncIdToken;
+    let syncAccountId = account.accountId;
+    let syncEmail = account.email;
+    let changed = false;
+    let nextStoredAccount = null;
+    if (!hasUsableAccessToken(account, now)) {
+        const refreshResult = await queuedRefresh(account.refreshToken);
+        if (refreshResult.type !== "success") {
+            return false;
+        }
+        nextStoredAccount = structuredClone(account);
+        const tokenAccountId = extractAccountId(refreshResult.access);
+        const nextEmail = sanitizeEmail(extractAccountEmail(refreshResult.access, refreshResult.idToken));
+        if (nextStoredAccount.refreshToken !== refreshResult.refresh) {
+            nextStoredAccount.refreshToken = refreshResult.refresh;
+            changed = true;
+        }
+        if (nextStoredAccount.accessToken !== refreshResult.access) {
+            nextStoredAccount.accessToken = refreshResult.access;
+            changed = true;
+        }
+        if (nextStoredAccount.expiresAt !== refreshResult.expires) {
+            nextStoredAccount.expiresAt = refreshResult.expires;
+            changed = true;
+        }
+        if (nextEmail && nextEmail !== nextStoredAccount.email) {
+            nextStoredAccount.email = nextEmail;
+            changed = true;
+        }
+        if (applyTokenAccountIdentity(nextStoredAccount, tokenAccountId)) {
+            changed = true;
+        }
+        syncAccessToken = refreshResult.access;
+        syncRefreshToken = refreshResult.refresh;
+        syncExpiresAt = refreshResult.expires;
+        syncIdToken = refreshResult.idToken;
+        syncAccountId = nextStoredAccount.accountId;
+        syncEmail = nextStoredAccount.email;
+    }
+    if (changed && nextStoredAccount) {
+        let persisted = false;
+        await withAccountStorageTransaction(async (loadedStorage, persist) => {
+            if (!loadedStorage) {
+                return;
+            }
+            const nextStorage = structuredClone(loadedStorage);
+            const targetIndex = findMatchingAccountIndex(nextStorage.accounts, accountMatch, {
+                allowUniqueAccountIdFallbackWithoutEmail: true,
+            })
+                ?? findMatchingAccountIndex(nextStorage.accounts, nextStoredAccount, {
+                    allowUniqueAccountIdFallbackWithoutEmail: true,
+                });
+            if (targetIndex === undefined) {
+                return;
+            }
+            nextStorage.accounts[targetIndex] = structuredClone(nextStoredAccount);
+            await persist(nextStorage);
+            persisted = true;
+        });
+        if (!persisted) {
+            return false;
+        }
+    }
+    return setCodexCliActiveSelection({
+        accountId: syncAccountId,
+        email: syncEmail,
+        accessToken: syncAccessToken,
+        refreshToken: syncRefreshToken,
+        expiresAt: syncExpiresAt,
+        ...(syncIdToken ? { idToken: syncIdToken } : {}),
+    });
+}
+export async function autoPickBestAccountOnLaunchIfEnabled() {
+    const displaySettings = await loadDashboardDisplaySettings();
+    if (!(displaySettings.autoPickBestAccountOnLaunch ?? false)) {
+        return false;
+    }
+    const exitCode = await runBestCommand(["--live"], {
+        setStoragePath,
+        loadAccounts,
+        saveAccounts,
+        parseBestArgs,
+        printBestUsage,
+        resolveActiveIndex,
+        hasUsableAccessToken,
+        queuedRefresh,
+        normalizeFailureDetail,
+        extractAccountId,
+        extractAccountEmail,
+        sanitizeEmail,
+        formatAccountLabel,
+        fetchCodexQuotaSnapshot,
+        evaluateForecastAccounts,
+        recommendForecastAccount,
+        persistAndSyncSelectedAccount,
+        setCodexCliActiveSelection,
+        logInfo: () => { },
+        logWarn: () => { },
+        logError: () => { },
+    });
+    return exitCode === 0;
+}
+export async function runCodexMultiAuthCli(rawArgs) {
+    const startupDisplaySettings = await loadDashboardDisplaySettings();
+    applyUiThemeFromDashboardSettings(startupDisplaySettings);
+    const args = [...rawArgs];
+    if (args.length === 0) {
+        printUsage();
+        return 0;
+    }
+    if (args[0] === "--help" || args[0] === "-h") {
+        printUsage();
+        return 0;
+    }
+    const [root, sub, ...rest] = args;
+    if (root !== "auth") {
+        printUsage();
+        return 1;
+    }
+    const command = sub ?? "login";
+    if (command === "--help" || command === "-h") {
+        printUsage();
+        return 0;
+    }
+    if (command === "login") {
+        return runAuthLogin(rest);
+    }
+    if (command === "list" || command === "status") {
+        return runStatusCommand({
+            setStoragePath,
+            getStoragePath,
+            loadAccounts,
+            resolveActiveIndex,
+            formatRateLimitEntry,
+        });
+    }
+    if (command === "switch") {
+        return runSwitchCommand(rest, {
+            setStoragePath,
+            loadAccounts,
+            persistAndSyncSelectedAccount,
+        });
+    }
+    if (command === "check") {
+        return runCheckCommand({ runHealthCheck });
+    }
+    if (command === "features") {
+        return runFeaturesCommand({ implementedFeatures: IMPLEMENTED_FEATURES });
+    }
+    if (command === "verify-flagged") {
+        return runRepairVerifyFlagged(rest, createRepairCommandDeps());
+    }
+    if (command === "forecast") {
+        return runForecast(rest);
+    }
+    if (command === "best") {
+        return runBest(rest);
+    }
+    if (command === "report") {
+        return runReportCommand(rest, {
+            setStoragePath,
+            getStoragePath,
+            loadAccounts,
+            resolveActiveIndex,
+            queuedRefresh,
+            fetchCodexQuotaSnapshot,
+            formatRateLimitEntry,
+            normalizeFailureDetail,
+        });
+    }
+    if (command === "fix") {
+        return runRepairFix(rest, createRepairCommandDeps());
+    }
+    if (command === "doctor") {
+        return runRepairDoctor(rest, createRepairCommandDeps());
+    }
+    if (command === "config") {
+        const [subcommand, ...configArgs] = rest;
+        if (subcommand === "explain") {
+            return runConfigExplainCommand(configArgs, {
+                getReport: getPluginConfigExplainReport,
+            });
+        }
+        if (subcommand === "template") {
+            return runInitConfigCommand(configArgs);
+        }
+        console.error(`Unknown config command: ${subcommand ?? "(missing)"}`);
+        return 1;
+    }
+    if (command === "init-config") {
+        return runInitConfigCommand(rest);
+    }
+    if (command === "debug") {
+        const [subcommand, ...debugArgs] = rest;
+        if (subcommand === "bundle") {
+            return runDebugBundleCommand(debugArgs, {
+                getConfigReport: getPluginConfigExplainReport,
+                getStoragePath,
+                loadAccounts,
+                loadFlaggedAccounts,
+                loadCodexCliState,
+                getLastAccountsSaveTimestamp,
+            });
+        }
+        console.error(`Unknown debug command: ${subcommand ?? "(missing)"}`);
+        return 1;
+    }
+    console.error(`Unknown command: ${command}`);
+    printUsage();
+    return 1;
+}
+//# sourceMappingURL=codex-manager.js.map

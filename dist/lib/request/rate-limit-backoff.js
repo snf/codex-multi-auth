@@ -1,0 +1,103 @@
+/**
+ * Rate limit state tracking with time-window deduplication.
+ *
+ * Matches the antigravity plugin behavior:
+ * - Deduplicate concurrent 429s so parallel requests don't over-increment backoff.
+ * - Reset backoff after a quiet period.
+ */
+const RATE_LIMIT_DEDUP_WINDOW_MS = 2000;
+const RATE_LIMIT_STATE_RESET_MS = 120_000;
+const MAX_BACKOFF_MS = 60_000;
+export const RATE_LIMIT_SHORT_RETRY_THRESHOLD_MS = 5000;
+const rateLimitStateByAccountQuota = new Map();
+function normalizeDelayMs(value, fallback) {
+    const candidate = typeof value === "number" && Number.isFinite(value) ? value : fallback;
+    return Math.max(0, Math.floor(candidate));
+}
+function pruneStaleRateLimitState() {
+    const now = Date.now();
+    for (const [key, state] of rateLimitStateByAccountQuota) {
+        if (now - state.lastAt > RATE_LIMIT_STATE_RESET_MS) {
+            rateLimitStateByAccountQuota.delete(key);
+        }
+    }
+}
+/**
+ * Compute rate-limit backoff for an account+quota key.
+ */
+export function getRateLimitBackoff(accountIndex, quotaKey, serverRetryAfterMs) {
+    pruneStaleRateLimitState();
+    const now = Date.now();
+    const stateKey = `${accountIndex}:${quotaKey}`;
+    const previous = rateLimitStateByAccountQuota.get(stateKey);
+    const baseDelay = normalizeDelayMs(serverRetryAfterMs, 1000);
+    if (previous && now - previous.lastAt < RATE_LIMIT_DEDUP_WINDOW_MS) {
+        const backoffDelay = Math.min(baseDelay * Math.pow(2, previous.consecutive429 - 1), MAX_BACKOFF_MS);
+        return {
+            attempt: previous.consecutive429,
+            delayMs: Math.max(baseDelay, backoffDelay),
+            isDuplicate: true,
+        };
+    }
+    const attempt = previous && now - previous.lastAt < RATE_LIMIT_STATE_RESET_MS
+        ? previous.consecutive429 + 1
+        : 1;
+    rateLimitStateByAccountQuota.set(stateKey, {
+        consecutive429: attempt,
+        lastAt: now,
+        quotaKey,
+    });
+    const backoffDelay = Math.min(baseDelay * Math.pow(2, attempt - 1), MAX_BACKOFF_MS);
+    return {
+        attempt,
+        delayMs: Math.max(baseDelay, backoffDelay),
+        isDuplicate: false,
+    };
+}
+export function resetRateLimitBackoff(accountIndex, quotaKey) {
+    rateLimitStateByAccountQuota.delete(`${accountIndex}:${quotaKey}`);
+}
+export function clearRateLimitBackoffState() {
+    rateLimitStateByAccountQuota.clear();
+}
+const BACKOFF_MULTIPLIERS = {
+    quota: 3.0,
+    tokens: 1.5,
+    concurrent: 0.5,
+    unknown: 1.0,
+};
+export function calculateBackoffMs(baseDelayMs, attempt, reason = "unknown") {
+    const multiplier = BACKOFF_MULTIPLIERS[reason] ?? 1.0;
+    const exponentialDelay = baseDelayMs * Math.pow(2, attempt - 1);
+    return Math.min(Math.floor(exponentialDelay * multiplier), MAX_BACKOFF_MS);
+}
+export function getRateLimitBackoffWithReason(accountIndexOrParams, quotaKey, serverRetryAfterMs, reason = "unknown") {
+    const useNamedParams = typeof accountIndexOrParams !== "number";
+    const resolvedAccountIndex = useNamedParams
+        ? accountIndexOrParams.accountIndex
+        : accountIndexOrParams;
+    const resolvedQuotaKey = useNamedParams
+        ? accountIndexOrParams.quotaKey
+        : quotaKey;
+    const resolvedServerRetryAfterMs = useNamedParams
+        ? accountIndexOrParams.serverRetryAfterMs
+        : serverRetryAfterMs;
+    const resolvedReason = useNamedParams
+        ? (accountIndexOrParams.reason ?? "unknown")
+        : reason;
+    if (!Number.isInteger(resolvedAccountIndex) || resolvedAccountIndex < 0) {
+        throw new TypeError("getRateLimitBackoffWithReason requires a non-negative integer accountIndex");
+    }
+    if (typeof resolvedQuotaKey !== "string" || resolvedQuotaKey.trim().length === 0) {
+        throw new TypeError("getRateLimitBackoffWithReason requires a non-empty quotaKey");
+    }
+    const normalizedQuotaKey = resolvedQuotaKey.trim();
+    const result = getRateLimitBackoff(resolvedAccountIndex, normalizedQuotaKey, resolvedServerRetryAfterMs);
+    const adjustedDelay = calculateBackoffMs(result.delayMs, result.attempt, resolvedReason);
+    return {
+        ...result,
+        delayMs: adjustedDelay,
+        reason: resolvedReason,
+    };
+}
+//# sourceMappingURL=rate-limit-backoff.js.map

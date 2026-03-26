@@ -1,0 +1,1 @@
+{"version":3,"file":"flagged-storage.d.ts","sourceRoot":"","sources":["../../../lib/storage/flagged-storage.ts"],"names":[],"mappings":"AAAA,OAAO,KAAK,EAGX,uBAAuB,EACvB,MAAM,eAAe,CAAC;AAEvB,wBAAgB,uBAAuB,CACtC,IAAI,EAAE,OAAO,EACb,IAAI,EAAE;IACL,QAAQ,EAAE,CAAC,KAAK,EAAE,OAAO,KAAK,KAAK,IAAI,MAAM,CAAC,MAAM,EAAE,OAAO,CAAC,CAAC;IAC/D,GAAG,EAAE,MAAM,MAAM,CAAC;CAClB,GACC,uBAAuB,CAsHzB"}

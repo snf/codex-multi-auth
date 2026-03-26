@@ -1,0 +1,30 @@
+export async function promptExperimentalSettingsEntry(params) {
+    return params.promptExperimentalSettingsMenu({
+        initialConfig: params.initialConfig,
+        isInteractive: params.isInteractive,
+        ui: params.ui,
+        cloneBackendPluginConfig: params.cloneBackendPluginConfig,
+        select: params.select,
+        getExperimentalSelectOptions: params.getExperimentalSelectOptions,
+        mapExperimentalMenuHotkey: params.mapExperimentalMenuHotkey,
+        mapExperimentalStatusHotkey: params.mapExperimentalStatusHotkey,
+        formatDashboardSettingState: params.formatDashboardSettingState,
+        copy: params.copy,
+        input: params.input,
+        output: params.output,
+        runNamedBackupExport: params.runNamedBackupExport,
+        loadAccounts: params.loadAccounts,
+        loadExperimentalSyncTarget: params.loadExperimentalSyncTarget,
+        planOcChatgptSync: params.planOcChatgptSync,
+        applyOcChatgptSync: params.applyOcChatgptSync,
+        getTargetKind: params.getTargetKind,
+        getTargetDestination: params.getTargetDestination,
+        getTargetDetection: params.getTargetDetection,
+        getTargetErrorMessage: params.getTargetErrorMessage,
+        getPlanKind: params.getPlanKind,
+        getPlanBlockedReason: params.getPlanBlockedReason,
+        getPlanPreview: params.getPlanPreview,
+        getAppliedLabel: params.getAppliedLabel,
+    });
+}
+//# sourceMappingURL=experimental-settings-entry.js.map

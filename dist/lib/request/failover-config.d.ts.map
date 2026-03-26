@@ -1,0 +1,1 @@
+{"version":3,"file":"failover-config.d.ts","sourceRoot":"","sources":["../../../lib/request/failover-config.ts"],"names":[],"mappings":"AAAA,OAAO,KAAK,EAAE,YAAY,EAAE,MAAM,qBAAqB,CAAC;AAExD,wBAAgB,iBAAiB,CAAC,KAAK,EAAE,MAAM,GAAG,SAAS,GAAG,YAAY,CAKzE;AAED,wBAAgB,WAAW,CAAC,KAAK,EAAE,MAAM,GAAG,SAAS,GAAG,MAAM,GAAG,SAAS,CAIzE"}

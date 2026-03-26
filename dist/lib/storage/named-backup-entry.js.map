@@ -1,0 +1,1 @@
+{"version":3,"file":"named-backup-entry.js","sourceRoot":"","sources":["../../../lib/storage/named-backup-entry.ts"],"names":[],"mappings":"AAAA,MAAM,CAAC,KAAK,UAAU,sBAAsB,CAAC,MAqB5C;IACA,OAAO,MAAM,CAAC,qBAAqB,CAClC,MAAM,CAAC,IAAI,EACX;QACC,cAAc,EAAE,MAAM,CAAC,cAAc;QACrC,cAAc,EAAE,MAAM,CAAC,cAAc;KACrC,EACD,MAAM,CAAC,OAAO,CACd,CAAC;AACH,CAAC"}

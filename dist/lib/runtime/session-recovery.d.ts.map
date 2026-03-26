@@ -1,0 +1,1 @@
+{"version":3,"file":"session-recovery.d.ts","sourceRoot":"","sources":["../../../lib/runtime/session-recovery.ts"],"names":[],"mappings":"AAAA,OAAO,KAAK,EAAE,WAAW,EAAE,MAAM,kBAAkB,CAAC;AAGpD,wBAAgB,gCAAgC,CAAC,IAAI,EAAE;IACtD,OAAO,EAAE,OAAO,CAAC;IACjB,MAAM,EAAE,WAAW,CAAC,QAAQ,CAAC,CAAC;IAC9B,SAAS,EAAE,MAAM,CAAC;IAClB,UAAU,EAAE,OAAO,CAAC;CACpB,uDAOA"}

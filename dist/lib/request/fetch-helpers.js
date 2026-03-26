@@ -1,0 +1,898 @@
+/**
+ * Helper functions for the custom fetch implementation
+ * These functions break down the complex fetch logic into manageable, testable units
+ */
+import { ProxyAgent } from "undici";
+import { queuedRefresh } from "../refresh-queue.js";
+import { logRequest, logError, logWarn } from "../logger.js";
+import { getCodexInstructions, getModelFamily } from "../prompts/codex.js";
+import { transformRequestBody, normalizeModel, resolveFastSessionInputTrimPlan, } from "./request-transformer.js";
+import { attachResponseIdCapture, convertSseToJson, ensureContentType, } from "./response-handler.js";
+import { registerCleanup } from "../shutdown.js";
+import { CodexAuthError } from "../errors.js";
+import { isRecord } from "../utils.js";
+import { CODEX_BASE_URL, HTTP_STATUS, OPENAI_HEADERS, OPENAI_HEADER_VALUES, URL_PATHS, ERROR_MESSAGES, LOG_STAGES, } from "../constants.js";
+const CODEX_BASE_URL_OBJECT = new URL(CODEX_BASE_URL);
+const CODEX_BASE_PATH_PREFIX = CODEX_BASE_URL_OBJECT.pathname.endsWith("/")
+    ? CODEX_BASE_URL_OBJECT.pathname.slice(0, -1)
+    : CODEX_BASE_URL_OBJECT.pathname;
+const CHATGPT_CODEX_UNSUPPORTED_MODEL_CODE = "model_not_supported_with_chatgpt_account";
+const CHATGPT_CODEX_UNSUPPORTED_MODEL_PATTERN = /model is not supported when using codex with a chatgpt account/i;
+const NORMALIZED_UNSUPPORTED_MODEL_PATTERN = /the model ['"]([^'"]+)['"] is not currently available for this chatgpt account/i;
+const MAX_RETRY_DELAY_MS = 5 * 60 * 1000;
+const CREATE_CODEX_HEADERS_PARAM_KEYS = new Set(["init", "accountId", "accessToken", "opts"]);
+const DEFAULT_PROXY_PORTS = {
+    "http:": 80,
+    "https:": 443,
+};
+const sharedProxyDispatchers = new Map();
+export const DEFAULT_UNSUPPORTED_CODEX_FALLBACK_CHAIN = {
+    "gpt-5.3-codex-spark": ["gpt-5-codex", "gpt-5.3-codex", "gpt-5.2-codex"],
+    "gpt-5.3-codex": ["gpt-5-codex", "gpt-5.2-codex"],
+    "gpt-5.2-codex": ["gpt-5-codex"],
+    "gpt-5.1-codex": ["gpt-5-codex"],
+};
+function canonicalizeModelName(model) {
+    if (!model)
+        return undefined;
+    const trimmed = model.trim().toLowerCase();
+    if (!trimmed)
+        return undefined;
+    const stripped = trimmed.includes("/")
+        ? (trimmed.split("/").pop() ?? trimmed)
+        : trimmed;
+    return stripped.replace(/-(none|minimal|low|medium|high|xhigh)$/i, "");
+}
+function normalizeFallbackChain(customChain) {
+    const normalized = {};
+    for (const [key, values] of Object.entries(DEFAULT_UNSUPPORTED_CODEX_FALLBACK_CHAIN)) {
+        const normalizedKey = canonicalizeModelName(key);
+        if (!normalizedKey)
+            continue;
+        normalized[normalizedKey] = values
+            .map((value) => canonicalizeModelName(value))
+            .filter((value) => !!value);
+    }
+    if (!customChain) {
+        return normalized;
+    }
+    for (const [key, values] of Object.entries(customChain)) {
+        const normalizedKey = canonicalizeModelName(key);
+        if (!normalizedKey || !Array.isArray(values))
+            continue;
+        const normalizedValues = values
+            .map((value) => canonicalizeModelName(value))
+            .filter((value) => !!value);
+        if (normalizedValues.length > 0) {
+            normalized[normalizedKey] = normalizedValues;
+        }
+    }
+    return normalized;
+}
+export function extractUnsupportedCodexModelFromText(bodyText) {
+    const directMatch = bodyText.match(/['"]([^'"]+)['"]\s+model is not supported when using codex with a chatgpt account/i);
+    if (directMatch?.[1]) {
+        return canonicalizeModelName(directMatch[1]);
+    }
+    const normalizedMatch = bodyText.match(NORMALIZED_UNSUPPORTED_MODEL_PATTERN);
+    if (normalizedMatch?.[1]) {
+        return canonicalizeModelName(normalizedMatch[1]);
+    }
+    return undefined;
+}
+function isUnsupportedCodexModelForChatGpt(status, bodyText) {
+    if (status !== HTTP_STATUS.BAD_REQUEST)
+        return false;
+    if (!bodyText)
+        return false;
+    return CHATGPT_CODEX_UNSUPPORTED_MODEL_PATTERN.test(bodyText);
+}
+export function getUnsupportedCodexModelInfo(errorBody) {
+    if (!isRecord(errorBody)) {
+        return { isUnsupported: false };
+    }
+    const maybeError = errorBody.error;
+    if (!isRecord(maybeError)) {
+        return { isUnsupported: false };
+    }
+    const code = typeof maybeError.code === "string" ? maybeError.code : undefined;
+    const message = typeof maybeError.message === "string" ? maybeError.message : undefined;
+    const unsupportedModelFromPayload = typeof maybeError.unsupported_model === "string"
+        ? maybeError.unsupported_model
+        : undefined;
+    const unsupportedModel = unsupportedModelFromPayload
+        ? canonicalizeModelName(unsupportedModelFromPayload)
+        : extractUnsupportedCodexModelFromText(message ?? "");
+    const isUnsupported = code === CHATGPT_CODEX_UNSUPPORTED_MODEL_CODE ||
+        (message ? CHATGPT_CODEX_UNSUPPORTED_MODEL_PATTERN.test(message) : false);
+    return {
+        isUnsupported,
+        code,
+        message,
+        unsupportedModel: unsupportedModel ?? undefined,
+    };
+}
+export function resolveUnsupportedCodexFallbackModel(options) {
+    if (!options.fallbackOnUnsupportedCodexModel)
+        return undefined;
+    const unsupported = getUnsupportedCodexModelInfo(options.errorBody);
+    if (!unsupported.isUnsupported)
+        return undefined;
+    const requestedModel = canonicalizeModelName(options.requestedModel);
+    const currentModel = requestedModel ?? unsupported.unsupportedModel;
+    if (!currentModel)
+        return undefined;
+    const attempted = new Set();
+    for (const model of options.attemptedModels ?? []) {
+        const normalized = canonicalizeModelName(model);
+        if (normalized)
+            attempted.add(normalized);
+    }
+    const chain = normalizeFallbackChain(options.customChain);
+    const targets = chain[currentModel] ?? [];
+    if (targets.length === 0)
+        return undefined;
+    for (const target of targets) {
+        if (!options.fallbackToGpt52OnUnsupportedGpt53 &&
+            currentModel === "gpt-5.3-codex" &&
+            target === "gpt-5.2-codex") {
+            continue;
+        }
+        if (target === currentModel)
+            continue;
+        if (attempted.has(target))
+            continue;
+        return target;
+    }
+    return undefined;
+}
+/**
+ * Returns true when the legacy `gpt-5.3-codex -> gpt-5.2-codex` edge is available.
+ */
+export function shouldFallbackToGpt52OnUnsupportedGpt53(requestedModel, errorBody) {
+    if (canonicalizeModelName(requestedModel) !== "gpt-5.3-codex") {
+        return false;
+    }
+    return (resolveUnsupportedCodexFallbackModel({
+        requestedModel,
+        errorBody,
+        // Skip the canonical `gpt-5-codex` step and probe whether the legacy
+        // gpt-5.2 edge is still active under current policy/toggles.
+        attemptedModels: ["gpt-5-codex"],
+        fallbackOnUnsupportedCodexModel: true,
+        fallbackToGpt52OnUnsupportedGpt53: true,
+    }) === "gpt-5.2-codex");
+}
+/**
+ * Detects whether an error code or response body indicates an entitlement/subscription issue for Codex models.
+ *
+ * Entitlement errors signal that the requested feature is not included in the user's plan and should not be treated as rate limits.
+ * This function is pure and safe to call concurrently; it performs no filesystem access (including on Windows) and does not read or redact tokens — callers must avoid passing sensitive credentials in `code` or `bodyText`.
+ *
+ * @param code - The error code string returned by the service
+ * @param bodyText - The response body text to inspect for entitlement-related phrases
+ * @returns `true` if the combined `code` or `bodyText` indicates an entitlement/subscription issue, `false` otherwise
+ */
+export function isEntitlementError(code, bodyText) {
+    const haystack = `${code} ${bodyText}`.toLowerCase();
+    // "usage_not_included" means the subscription doesn't include this feature
+    // This is different from "usage_limit_reached" which is a temporary quota limit
+    return /usage_not_included|not.included.in.your.plan|subscription.does.not.include/i.test(haystack);
+}
+/**
+ * Detects whether an error indicates the workspace/account has been disabled or expired.
+ *
+ * Workspace disabled errors signal that the current workspace is no longer accessible
+ * (expired, disabled, or removed) and the plugin should automatically switch to another account.
+ *
+ * @param status - HTTP status code
+ * @param code - The error code string returned by the service
+ * @param bodyText - The response body text to inspect for workspace-related phrases
+ * @returns `true` if the error indicates a disabled/expired workspace
+ */
+export function isWorkspaceDisabledError(status, code, bodyText) {
+    if (status !== 403) {
+        return false;
+    }
+    const normalizedCode = typeof code === "string" ? code.trim().toLowerCase() : "";
+    const haystack = `${normalizedCode} ${bodyText}`.toLowerCase();
+    const disabledPatterns = [
+        /workspace.*(?:disabled|expired|deactivated|terminated)/i,
+        /account\s+(?:has\s+been|is)\s+(?:disabled|expired|deactivated|terminated|closed)/i,
+        /(?:workspace|org(?:anization)?).*no longer.*(?:active|available|valid)/i,
+        /(?:workspace|org(?:anization)?).*has been.*(?:disabled|expired|closed)/i,
+        /workspace.*(?:access|subscription).*expired/i,
+        /org(?:anization)?.*(?:disabled|expired|inactive)/i,
+    ];
+    for (const pattern of disabledPatterns) {
+        if (pattern.test(haystack)) {
+            return true;
+        }
+    }
+    const workspaceErrorCodes = new Set([
+        "workspace_disabled",
+        "workspace_expired",
+        "workspace_terminated",
+        "account_disabled",
+        "account_expired",
+        "organization_disabled",
+    ]);
+    if (workspaceErrorCodes.has(normalizedCode)) {
+        return true;
+    }
+    const normalizedTokens = normalizedCode
+        .split(/[^a-z0-9_]+/i)
+        .map((token) => token.trim())
+        .filter((token) => token.length > 0);
+    return normalizedTokens.some((token) => workspaceErrorCodes.has(token));
+}
+/**
+ * Constructs a standardized 403 entitlement error Response indicating the user lacks access to Codex models.
+ *
+ * This function returns a JSON Response with an `error` payload containing a user-facing message, a
+ * `type` of `"entitlement_error"`, and a `code` of `"usage_not_included"`. The message suggests checking
+ * account/workspace access and re-authenticating with `codex login`.
+ *
+ * Concurrency: stateless and safe to call concurrently from multiple threads or requests.
+ * Windows filesystem behavior: none (function does not access the filesystem).
+ * Token redaction: any tokens are not included in the generated payload; do not pass sensitive tokens in `_bodyText`.
+ *
+ * @param _bodyText - Original response body text (accepted for compatibility; ignored when building the response)
+ * @returns A 403 Response with a JSON body describing the entitlement error and guidance for resolving it
+ */
+export function createEntitlementErrorResponse(_bodyText) {
+    const message = "This model is not included in your ChatGPT subscription. " +
+        "Please check that your account or workspace has access to Codex models (Plus/Pro/Business/Enterprise). " +
+        "If you recently subscribed or switched workspaces, try logging out and back in with `codex login`.";
+    const payload = {
+        error: {
+            message,
+            type: "entitlement_error",
+            code: "usage_not_included",
+        },
+    };
+    return new Response(JSON.stringify(payload), {
+        status: 403, // Forbidden - not a rate limit
+        statusText: "Forbidden",
+        headers: { "content-type": "application/json; charset=utf-8" },
+    });
+}
+function isCreateCodexHeadersNamedParams(value) {
+    if (!isRecord(value))
+        return false;
+    if (typeof value.accountId !== "string" || typeof value.accessToken !== "string")
+        return false;
+    return Object.keys(value).every((key) => CREATE_CODEX_HEADERS_PARAM_KEYS.has(key));
+}
+/**
+ * Determines if the current auth token needs to be refreshed
+ * @param auth - Current authentication state
+ * @returns True if token is expired or invalid
+ */
+export function shouldRefreshToken(auth, skewMs = 0) {
+    if (auth.type !== "oauth")
+        return true;
+    if (!auth.access)
+        return true;
+    const safeSkewMs = Math.max(0, Math.floor(skewMs));
+    return auth.expires <= Date.now() + safeSkewMs;
+}
+/**
+ * Refreshes the OAuth token and updates stored credentials
+ * @param currentAuth - Current auth state
+ * @param client - Codex client for updating stored credentials
+ * @returns Updated auth (throws on failure)
+ */
+export async function refreshAndUpdateToken(currentAuth, client) {
+    const authSetter = client.auth;
+    if (!authSetter || typeof authSetter.set !== "function") {
+        throw new CodexAuthError(ERROR_MESSAGES.TOKEN_REFRESH_FAILED, { retryable: false });
+    }
+    const refreshToken = currentAuth.type === "oauth" ? currentAuth.refresh : "";
+    const refreshResult = await queuedRefresh(refreshToken);
+    if (refreshResult.type === "failed") {
+        throw new CodexAuthError(ERROR_MESSAGES.TOKEN_REFRESH_FAILED, { retryable: false });
+    }
+    await authSetter.set({
+        path: { id: "openai" },
+        body: {
+            type: "oauth",
+            access: refreshResult.access,
+            refresh: refreshResult.refresh,
+            expires: refreshResult.expires,
+            multiAccount: true,
+        },
+    });
+    // Update current auth reference if it's OAuth type
+    if (currentAuth.type === "oauth") {
+        currentAuth.access = refreshResult.access;
+        currentAuth.refresh = refreshResult.refresh;
+        currentAuth.expires = refreshResult.expires;
+    }
+    return currentAuth;
+}
+/**
+ * Extracts URL string from various request input types
+ * @param input - Request input (string, URL, or Request object)
+ * @returns URL string
+ */
+export function extractRequestUrl(input) {
+    if (typeof input === "string")
+        return input;
+    if (input instanceof URL)
+        return input.toString();
+    return input.url;
+}
+/**
+ * Rewrites OpenAI API URLs to Codex backend URLs
+ * @param url - Original URL
+ * @returns Rewritten URL for Codex backend
+ */
+export function rewriteUrlForCodex(url) {
+    const parsedUrl = new URL(url);
+    const rewrittenPath = parsedUrl.pathname.includes(URL_PATHS.RESPONSES)
+        ? parsedUrl.pathname.replace(URL_PATHS.RESPONSES, URL_PATHS.CODEX_RESPONSES)
+        : parsedUrl.pathname;
+    const normalizedPath = rewrittenPath === CODEX_BASE_PATH_PREFIX ||
+        rewrittenPath.startsWith(`${CODEX_BASE_PATH_PREFIX}/`)
+        ? rewrittenPath
+        : `${CODEX_BASE_PATH_PREFIX}${rewrittenPath.startsWith("/") ? rewrittenPath : `/${rewrittenPath}`}`;
+    parsedUrl.protocol = CODEX_BASE_URL_OBJECT.protocol;
+    parsedUrl.username = "";
+    parsedUrl.password = "";
+    parsedUrl.host = CODEX_BASE_URL_OBJECT.host;
+    parsedUrl.pathname = normalizedPath;
+    return parsedUrl.toString();
+}
+function hasOwnEnvKey(env, key) {
+    return Object.prototype.hasOwnProperty.call(env, key);
+}
+function resolveProxyEnvValue(env, lowerKey, upperKey) {
+    if (hasOwnEnvKey(env, lowerKey)) {
+        const value = env[lowerKey]?.trim();
+        return value ? value : undefined;
+    }
+    const value = env[upperKey]?.trim();
+    return value ? value : undefined;
+}
+function parseNoProxyEntries(noProxyValue) {
+    return noProxyValue
+        .split(/[,\s]/)
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+        .map((entry) => {
+        const parsed = entry.match(/^(.+):(\d+)$/);
+        const hostname = parsed?.[1] ?? entry;
+        const portText = parsed?.[2];
+        return {
+            hostname: hostname.toLowerCase(),
+            port: portText ? Number.parseInt(portText, 10) : 0,
+        };
+    });
+}
+function shouldBypassProxyForUrl(url, noProxyValue) {
+    if (!noProxyValue)
+        return false;
+    if (noProxyValue === "*")
+        return true;
+    const hostname = url.host.replace(/:\d*$/, "").toLowerCase();
+    const port = Number.parseInt(url.port, 10) || DEFAULT_PROXY_PORTS[url.protocol] || 0;
+    for (const entry of parseNoProxyEntries(noProxyValue)) {
+        if (entry.hostname === "*")
+            return true;
+        if (entry.port && entry.port !== port)
+            continue;
+        if (!/^[.*]/.test(entry.hostname)) {
+            if (hostname === entry.hostname) {
+                return true;
+            }
+            continue;
+        }
+        if (hostname.endsWith(entry.hostname.replace(/^\*/, ""))) {
+            return true;
+        }
+    }
+    return false;
+}
+export function resolveProxyUrlForRequest(url, env = process.env) {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return undefined;
+    }
+    const httpProxy = resolveProxyEnvValue(env, "http_proxy", "HTTP_PROXY");
+    const httpsProxy = resolveProxyEnvValue(env, "https_proxy", "HTTPS_PROXY");
+    if (!httpProxy && !httpsProxy) {
+        return undefined;
+    }
+    const noProxy = resolveProxyEnvValue(env, "no_proxy", "NO_PROXY");
+    if (shouldBypassProxyForUrl(parsed, noProxy)) {
+        return undefined;
+    }
+    return parsed.protocol === "https:"
+        ? (httpsProxy ?? httpProxy)
+        : httpProxy;
+}
+function getSharedProxyDispatcher(proxyUrl) {
+    const existing = sharedProxyDispatchers.get(proxyUrl);
+    if (existing) {
+        return existing;
+    }
+    const dispatcher = new ProxyAgent(proxyUrl);
+    sharedProxyDispatchers.set(proxyUrl, dispatcher);
+    return dispatcher;
+}
+export async function closeSharedProxyDispatchers() {
+    while (sharedProxyDispatchers.size > 0) {
+        const dispatchers = [...sharedProxyDispatchers.values()];
+        sharedProxyDispatchers.clear();
+        await Promise.allSettled(dispatchers.map(async (dispatcher) => {
+            if (typeof dispatcher.close === "function") {
+                await dispatcher.close();
+            }
+        }));
+    }
+}
+registerCleanup(closeSharedProxyDispatchers);
+export function applyProxyCompatibleInit(url, init, env = process.env) {
+    const resolvedInit = init ?? {};
+    if (resolvedInit.dispatcher || resolvedInit.agent) {
+        return resolvedInit;
+    }
+    const proxyUrl = resolveProxyUrlForRequest(url, env);
+    if (!proxyUrl) {
+        return resolvedInit;
+    }
+    return {
+        ...resolvedInit,
+        dispatcher: getSharedProxyDispatcher(proxyUrl),
+    };
+}
+/**
+ * Transforms request body and logs the transformation
+ * Fetches model-specific Codex instructions based on the request model
+ *
+ * @param init - Request init options
+ * @param url - Request URL
+ * @param userConfig - User configuration
+ * @param codexMode - Enable CODEX_MODE (bridge prompt instead of tool remap)
+ * @param parsedBody - Pre-parsed body to avoid double JSON.parse (optional)
+ * @returns Transformed body and updated init, or undefined if no body
+ */
+export async function transformRequestForCodex(init, url, userConfig, codexMode = true, parsedBody, options) {
+    const hasParsedBody = parsedBody !== undefined &&
+        parsedBody !== null &&
+        typeof parsedBody === "object" &&
+        Object.keys(parsedBody).length > 0;
+    if (!init?.body && !hasParsedBody)
+        return undefined;
+    try {
+        // Use pre-parsed body if provided, otherwise parse from init.body
+        let body;
+        if (hasParsedBody) {
+            body = parsedBody;
+        }
+        else {
+            if (typeof init?.body !== "string")
+                return undefined;
+            body = JSON.parse(init.body);
+        }
+        const originalModel = body.model;
+        const fastSessionInputTrimPlan = resolveFastSessionInputTrimPlan(body, options?.fastSession ?? false, options?.fastSessionStrategy ?? "hybrid", options?.fastSessionMaxInputItems ?? 30);
+        // Normalize model first to determine which instructions to fetch
+        // This ensures we get the correct model-specific prompt
+        const normalizedModel = normalizeModel(originalModel);
+        const modelFamily = getModelFamily(normalizedModel);
+        // Log original request
+        logRequest(LOG_STAGES.BEFORE_TRANSFORM, {
+            url,
+            originalModel,
+            model: body.model,
+            hasTools: !!body.tools,
+            hasInput: !!body.input,
+            inputLength: body.input?.length,
+            codexMode,
+            body: body,
+        });
+        // Fetch model-specific Codex instructions (cached per model family)
+        const codexInstructions = await getCodexInstructions(normalizedModel);
+        // Transform request body
+        const transformedBody = await transformRequestBody(body, codexInstructions, userConfig, codexMode, options?.fastSession ?? false, options?.fastSessionStrategy ?? "hybrid", options?.fastSessionMaxInputItems ?? 30, options?.deferFastSessionInputTrimming ?? false, options?.allowBackgroundResponses ?? false);
+        // Log transformed request
+        logRequest(LOG_STAGES.AFTER_TRANSFORM, {
+            url,
+            originalModel,
+            normalizedModel: transformedBody.model,
+            modelFamily,
+            hasTools: !!transformedBody.tools,
+            hasInput: !!transformedBody.input,
+            inputLength: transformedBody.input?.length,
+            reasoning: transformedBody.reasoning,
+            textVerbosity: transformedBody.text?.verbosity,
+            include: transformedBody.include,
+            body: transformedBody,
+        });
+        return {
+            body: transformedBody,
+            updatedInit: { ...(init ?? {}), body: JSON.stringify(transformedBody) },
+            deferredFastSessionInputTrim: options?.deferFastSessionInputTrimming === true &&
+                transformedBody.background !== true
+                ? fastSessionInputTrimPlan.trim
+                : undefined,
+        };
+    }
+    catch (e) {
+        if (e instanceof Error &&
+            e.message.startsWith("Responses background mode")) {
+            throw e;
+        }
+        logError(`${ERROR_MESSAGES.REQUEST_PARSE_ERROR}`, e);
+        return undefined;
+    }
+}
+export function createCodexHeaders(initOrParams, accountId, accessToken, opts) {
+    const useNamedParams = typeof accountId === "undefined" &&
+        typeof accessToken === "undefined" &&
+        isCreateCodexHeadersNamedParams(initOrParams);
+    const namedParams = useNamedParams
+        ? initOrParams
+        : null;
+    const resolvedInit = useNamedParams
+        ? namedParams?.init
+        : initOrParams;
+    const resolvedAccountId = useNamedParams ? namedParams?.accountId : accountId;
+    const resolvedAccessToken = useNamedParams ? namedParams?.accessToken : accessToken;
+    const resolvedOpts = useNamedParams ? namedParams?.opts : opts;
+    if (!resolvedAccountId || !resolvedAccessToken) {
+        throw new TypeError("createCodexHeaders requires accountId and accessToken");
+    }
+    const headers = new Headers(resolvedInit?.headers ?? {});
+    headers.delete("x-api-key"); // Remove any existing API key
+    headers.set("Authorization", `Bearer ${resolvedAccessToken}`);
+    headers.set(OPENAI_HEADERS.ACCOUNT_ID, resolvedAccountId);
+    headers.set(OPENAI_HEADERS.BETA, OPENAI_HEADER_VALUES.BETA_RESPONSES);
+    headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
+    const cacheKey = resolvedOpts?.promptCacheKey;
+    if (cacheKey) {
+        headers.set(OPENAI_HEADERS.CONVERSATION_ID, cacheKey);
+        headers.set(OPENAI_HEADERS.SESSION_ID, cacheKey);
+    }
+    else {
+        headers.delete(OPENAI_HEADERS.CONVERSATION_ID);
+        headers.delete(OPENAI_HEADERS.SESSION_ID);
+    }
+    headers.set("accept", "text/event-stream");
+    return headers;
+}
+/**
+ * Handles error responses from the Codex API
+ * @param response - Error response from API
+ * @returns Original response or mapped retryable response
+ */
+export async function handleErrorResponse(response, options) {
+    const bodyText = await safeReadBody(response);
+    const mapped = mapUsageLimit404WithBody(response, bodyText);
+    // Entitlement errors return a ready-to-use Response with 403 status
+    if (mapped && mapped.status === HTTP_STATUS.FORBIDDEN) {
+        return { response: mapped, rateLimit: undefined, errorBody: undefined };
+    }
+    const finalResponse = mapped ?? response;
+    const rateLimit = extractRateLimitInfoFromBody(finalResponse, bodyText);
+    let errorBody;
+    try {
+        errorBody = bodyText ? JSON.parse(bodyText) : undefined;
+    }
+    catch {
+        errorBody = { message: bodyText };
+    }
+    const diagnostics = extractErrorDiagnostics(finalResponse, options);
+    const normalizedError = normalizeErrorPayload(errorBody, bodyText, finalResponse.statusText, finalResponse.status, diagnostics);
+    const errorResponse = ensureJsonErrorResponse(finalResponse, normalizedError);
+    if (finalResponse.status === HTTP_STATUS.UNAUTHORIZED) {
+        logWarn("Codex upstream returned 401 Unauthorized", diagnostics);
+    }
+    logRequest(LOG_STAGES.ERROR_RESPONSE, {
+        status: finalResponse.status,
+        statusText: finalResponse.statusText,
+        diagnostics,
+    });
+    return { response: errorResponse, rateLimit, errorBody: normalizedError };
+}
+/**
+ * Handles successful responses from the Codex API
+ * Converts SSE to JSON for non-streaming requests (generateText)
+ * Passes through SSE for streaming requests (streamText)
+ * @param response - Success response from API
+ * @param isStreaming - Whether this is a streaming request (stream=true in body)
+ * @returns Processed response (SSE→JSON for non-streaming, stream for streaming)
+ */
+export async function handleSuccessResponse(response, isStreaming, options) {
+    // Check for deprecation headers (RFC 8594)
+    const deprecation = response.headers.get("Deprecation");
+    const sunset = response.headers.get("Sunset");
+    if (deprecation || sunset) {
+        logWarn(`API deprecation notice`, { deprecation, sunset });
+    }
+    const responseHeaders = ensureContentType(response.headers);
+    // For non-streaming requests (generateText), convert SSE to JSON
+    if (!isStreaming) {
+        return await convertSseToJson(response, responseHeaders, options);
+    }
+    // For streaming requests (streamText), return stream as-is
+    return attachResponseIdCapture(response, responseHeaders, options?.onResponseId);
+}
+async function safeReadBody(response) {
+    try {
+        return await response.clone().text();
+    }
+    catch {
+        return "";
+    }
+}
+function mapUsageLimit404WithBody(response, bodyText) {
+    if (response.status !== HTTP_STATUS.NOT_FOUND)
+        return null;
+    if (!bodyText)
+        return null;
+    let code = "";
+    try {
+        const parsed = JSON.parse(bodyText);
+        code = (parsed?.error?.code ?? parsed?.error?.type ?? "").toString();
+    }
+    catch {
+        code = "";
+    }
+    // Check for entitlement errors first - these should NOT be treated as rate limits
+    if (isEntitlementError(code, bodyText)) {
+        return createEntitlementErrorResponse(bodyText);
+    }
+    const haystack = `${code} ${bodyText}`.toLowerCase();
+    if (!/usage_limit_reached|rate_limit_exceeded|usage limit/i.test(haystack)) {
+        return null;
+    }
+    const headers = new Headers(response.headers);
+    return new Response(bodyText, {
+        status: HTTP_STATUS.TOO_MANY_REQUESTS,
+        statusText: "Too Many Requests",
+        headers,
+    });
+}
+function extractRateLimitInfoFromBody(response, bodyText) {
+    const isStatusRateLimit = response.status === HTTP_STATUS.TOO_MANY_REQUESTS;
+    const parsed = parseRateLimitBody(bodyText);
+    const haystack = `${parsed?.code ?? ""} ${bodyText}`.toLowerCase();
+    // Entitlement errors should not be treated as rate limits
+    if (isEntitlementError(parsed?.code ?? "", bodyText)) {
+        return undefined;
+    }
+    const isRateLimit = isStatusRateLimit ||
+        /usage_limit_reached|rate_limit_exceeded|rate_limit|usage limit/i.test(haystack);
+    if (!isRateLimit)
+        return undefined;
+    const retryAfterMs = parseRetryAfterMs(response, parsed) ?? 60000;
+    return { retryAfterMs, code: parsed?.code };
+}
+function parseRateLimitBody(body) {
+    if (!body)
+        return undefined;
+    try {
+        const parsed = JSON.parse(body);
+        const error = parsed?.error ?? {};
+        const code = (error.code ?? error.type ?? "").toString();
+        const resetsAt = toNumber(error.resets_at ?? error.reset_at);
+        const retryAfterMs = toNumber(error.retry_after_ms);
+        const retryAfterSeconds = toNumber(error.retry_after);
+        return { code, resetsAt, retryAfterMs, retryAfterSeconds };
+    }
+    catch {
+        return undefined;
+    }
+}
+/**
+ * Build a normalized ErrorPayload from a raw response body, status, and diagnostics.
+ *
+ * Produces a structured error object by preferring explicit error fields in `errorBody`, falling back to `bodyText`, `statusText`, or a generic message; special-cases Codex ChatGPT unsupported-model entitlement errors and appends diagnostic info when provided.
+ *
+ * @param errorBody - Parsed response body, if available; may be any JSON-derived value.
+ * @param bodyText - Raw response text used as a fallback message when structured fields are absent.
+ * @param statusText - HTTP status text used as a final fallback for the error message.
+ * @param status - HTTP status code; when 401 adds a short hint to run `codex login`.
+ * @param diagnostics - Optional diagnostic metadata (request IDs, correlation/thread IDs); fields may be redacted for tokens and sensitive values.
+ * @returns The normalized ErrorPayload with an `error.message` and optional `type`, `code`, `unsupported_model`, and `diagnostics` fields.
+ *
+ * Concurrency: pure and safe to call concurrently from multiple threads/tasks.
+ * Filesystem: performs no filesystem I/O and has no Windows-specific behavior.
+ * Token redaction: callers should assume diagnostic fields may be redacted to avoid leaking credentials.
+ */
+function normalizeErrorPayload(errorBody, bodyText, statusText, status, diagnostics) {
+    if (isUnsupportedCodexModelForChatGpt(status, bodyText)) {
+        const unsupportedModel = extractUnsupportedCodexModelFromText(bodyText) ?? "requested model";
+        const payload = {
+            error: {
+                message: `The model '${unsupportedModel}' is not currently available for this ChatGPT account when using Codex OAuth. ` +
+                    "This is an account/workspace entitlement gate, not a temporary rate limit. " +
+                    "Try 'gpt-5-codex' (canonical), or legacy aliases like 'gpt-5.3-codex'/'gpt-5.2-codex', or enable automatic fallback via " +
+                    'unsupportedCodexPolicy: "fallback" (or CODEX_AUTH_UNSUPPORTED_MODEL_POLICY=fallback). ' +
+                    "(Legacy: CODEX_AUTH_FALLBACK_UNSUPPORTED_MODEL=1 or fallbackOnUnsupportedCodexModel).",
+                type: "entitlement_error",
+                code: CHATGPT_CODEX_UNSUPPORTED_MODEL_CODE,
+                unsupported_model: unsupportedModel,
+            },
+        };
+        if (diagnostics && Object.keys(diagnostics).length > 0) {
+            payload.error.diagnostics = diagnostics;
+        }
+        return payload;
+    }
+    if (isRecord(errorBody)) {
+        const maybeError = errorBody.error;
+        if (isRecord(maybeError) && typeof maybeError.message === "string") {
+            const payload = {
+                error: {
+                    message: maybeError.message,
+                },
+            };
+            if (typeof maybeError.type === "string") {
+                payload.error.type = maybeError.type;
+            }
+            if (typeof maybeError.code === "string" || typeof maybeError.code === "number") {
+                payload.error.code = maybeError.code;
+            }
+            if (diagnostics && Object.keys(diagnostics).length > 0) {
+                payload.error.diagnostics = diagnostics;
+            }
+            if (status === HTTP_STATUS.UNAUTHORIZED) {
+                payload.error.message = `${payload.error.message} (run \`codex login\` if this persists)`;
+            }
+            return payload;
+        }
+        if (typeof errorBody.message === "string") {
+            const payload = { error: { message: errorBody.message } };
+            if (diagnostics && Object.keys(diagnostics).length > 0) {
+                payload.error.diagnostics = diagnostics;
+            }
+            if (status === HTTP_STATUS.UNAUTHORIZED) {
+                payload.error.message = `${payload.error.message} (run \`codex login\` if this persists)`;
+            }
+            return payload;
+        }
+    }
+    const trimmed = bodyText.trim();
+    if (trimmed) {
+        const payload = { error: { message: trimmed } };
+        if (diagnostics && Object.keys(diagnostics).length > 0) {
+            payload.error.diagnostics = diagnostics;
+        }
+        if (status === HTTP_STATUS.UNAUTHORIZED) {
+            payload.error.message = `${payload.error.message} (run \`codex login\` if this persists)`;
+        }
+        return payload;
+    }
+    if (statusText) {
+        const payload = { error: { message: statusText } };
+        if (diagnostics && Object.keys(diagnostics).length > 0) {
+            payload.error.diagnostics = diagnostics;
+        }
+        if (status === HTTP_STATUS.UNAUTHORIZED) {
+            payload.error.message = `${payload.error.message} (run \`codex login\` if this persists)`;
+        }
+        return payload;
+    }
+    const payload = { error: { message: "Request failed" } };
+    if (diagnostics && Object.keys(diagnostics).length > 0) {
+        payload.error.diagnostics = diagnostics;
+    }
+    if (status === HTTP_STATUS.UNAUTHORIZED) {
+        payload.error.message = `${payload.error.message} (run \`codex login\` if this persists)`;
+    }
+    return payload;
+}
+function ensureJsonErrorResponse(response, payload) {
+    const headers = new Headers(response.headers);
+    headers.set("content-type", "application/json; charset=utf-8");
+    return new Response(JSON.stringify(payload), {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+    });
+}
+function parseRetryAfterMs(response, parsedBody) {
+    if (parsedBody?.retryAfterMs !== undefined) {
+        const normalized = normalizeRetryAfterMs(parsedBody.retryAfterMs);
+        if (normalized !== null)
+            return normalized;
+    }
+    if (parsedBody?.retryAfterSeconds !== undefined) {
+        const normalized = normalizeRetryAfterSeconds(parsedBody.retryAfterSeconds);
+        if (normalized !== null)
+            return normalized;
+    }
+    const retryAfterMsHeader = response.headers.get("retry-after-ms");
+    if (retryAfterMsHeader) {
+        const parsed = Number.parseInt(retryAfterMsHeader, 10);
+        if (!Number.isNaN(parsed) && parsed > 0) {
+            return parsed;
+        }
+    }
+    const retryAfterHeader = response.headers.get("retry-after");
+    if (retryAfterHeader) {
+        const parsed = Number.parseInt(retryAfterHeader, 10);
+        if (!Number.isNaN(parsed) && parsed > 0) {
+            return parsed * 1000;
+        }
+    }
+    const resetAtHeaders = [
+        "x-codex-primary-reset-at",
+        "x-codex-secondary-reset-at",
+        "x-ratelimit-reset",
+    ];
+    const now = Date.now();
+    const resetCandidates = [];
+    for (const header of resetAtHeaders) {
+        const value = response.headers.get(header);
+        if (!value)
+            continue;
+        const parsed = Number.parseInt(value, 10);
+        if (!Number.isNaN(parsed) && parsed > 0) {
+            const timestamp = parsed < 10_000_000_000 ? parsed * 1000 : parsed;
+            const delta = timestamp - now;
+            if (delta > 0)
+                resetCandidates.push(delta);
+        }
+    }
+    if (parsedBody?.resetsAt) {
+        const timestamp = parsedBody.resetsAt < 10_000_000_000
+            ? parsedBody.resetsAt * 1000
+            : parsedBody.resetsAt;
+        const delta = timestamp - now;
+        if (delta > 0)
+            resetCandidates.push(delta);
+    }
+    if (resetCandidates.length > 0) {
+        return Math.min(...resetCandidates);
+    }
+    return null;
+}
+function normalizeRetryAfterMs(value) {
+    if (!Number.isFinite(value))
+        return null;
+    const ms = Math.floor(value);
+    if (ms <= 0)
+        return null;
+    return Math.min(ms, MAX_RETRY_DELAY_MS);
+}
+function normalizeRetryAfterSeconds(value) {
+    if (!Number.isFinite(value))
+        return null;
+    const ms = Math.floor(value * 1000);
+    if (ms <= 0)
+        return null;
+    return Math.min(ms, MAX_RETRY_DELAY_MS);
+}
+function toNumber(value) {
+    if (value === null || value === undefined)
+        return undefined;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+}
+function extractErrorDiagnostics(response, options) {
+    const requestId = response.headers.get("x-request-id") ??
+        response.headers.get("request-id") ??
+        response.headers.get("openai-request-id") ??
+        response.headers.get("x-openai-request-id") ??
+        undefined;
+    const cfRay = response.headers.get("cf-ray") ?? undefined;
+    const diagnostics = {
+        httpStatus: response.status,
+        requestId,
+        cfRay,
+        correlationId: options?.requestCorrelationId,
+        threadId: options?.threadId,
+    };
+    for (const [key, value] of Object.entries(diagnostics)) {
+        if (value === undefined || value === "") {
+            delete diagnostics[key];
+        }
+    }
+    return Object.keys(diagnostics).length > 0 ? diagnostics : undefined;
+}
+//# sourceMappingURL=fetch-helpers.js.map
