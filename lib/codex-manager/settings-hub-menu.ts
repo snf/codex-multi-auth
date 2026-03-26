@@ -3,6 +3,7 @@ import type { MenuItem } from "../ui/select.js";
 export type SettingsHubMenuAction =
 	| { type: "account-list" }
 	| { type: "summary-fields" }
+	| { type: "startup" }
 	| { type: "behavior" }
 	| { type: "theme" }
 	| { type: "experimental" }
@@ -13,6 +14,7 @@ export function buildSettingsHubItems(copy: {
 	sectionTitle: string;
 	accountList: string;
 	summaryFields: string;
+	startup: string;
 	behavior: string;
 	theme: string;
 	advancedTitle: string;
@@ -33,6 +35,7 @@ export function buildSettingsHubItems(copy: {
 			value: { type: "summary-fields" },
 			color: "green",
 		},
+		{ label: copy.startup, value: { type: "startup" }, color: "green" },
 		{ label: copy.behavior, value: { type: "behavior" }, color: "green" },
 		{ label: copy.theme, value: { type: "theme" }, color: "green" },
 		{ label: "", value: { type: "back" }, separator: true },

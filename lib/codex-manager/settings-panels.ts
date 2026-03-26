@@ -5,6 +5,7 @@ import {
 } from "../dashboard-settings.js";
 import type { BehaviorSettingsPanelDeps } from "./behavior-settings-panel.js";
 import type { DashboardDisplayPanelDeps } from "./dashboard-display-panel.js";
+import type { StartupSettingsPanelDeps } from "./startup-settings-panel.js";
 import type { StatuslineSettingsPanelDeps } from "./statusline-settings-panel.js";
 import type { ThemeSettingsPanelDeps } from "./theme-settings-panel.js";
 
@@ -118,6 +119,25 @@ export async function promptBehaviorSettingsPanelEntry(params: {
 		AUTO_RETURN_OPTIONS_MS: params.AUTO_RETURN_OPTIONS_MS,
 		MENU_QUOTA_TTL_OPTIONS_MS: params.MENU_QUOTA_TTL_OPTIONS_MS,
 		BEHAVIOR_PANEL_KEYS: params.BEHAVIOR_PANEL_KEYS,
+		UI_COPY: params.UI_COPY,
+	});
+}
+
+export async function promptStartupSettingsPanelEntry(params: {
+	initial: DashboardDisplaySettings;
+	promptStartupSettingsPanel: (
+		initial: DashboardDisplaySettings,
+		deps: StartupSettingsPanelDeps,
+	) => Promise<DashboardDisplaySettings | null>;
+	cloneDashboardSettings: StartupSettingsPanelDeps["cloneDashboardSettings"];
+	applyDashboardDefaultsForKeys: StartupSettingsPanelDeps["applyDashboardDefaultsForKeys"];
+	STARTUP_PANEL_KEYS: StartupSettingsPanelDeps["STARTUP_PANEL_KEYS"];
+	UI_COPY: StartupSettingsPanelDeps["UI_COPY"];
+}): Promise<DashboardDisplaySettings | null> {
+	return params.promptStartupSettingsPanel(params.initial, {
+		cloneDashboardSettings: params.cloneDashboardSettings,
+		applyDashboardDefaultsForKeys: params.applyDashboardDefaultsForKeys,
+		STARTUP_PANEL_KEYS: params.STARTUP_PANEL_KEYS,
 		UI_COPY: params.UI_COPY,
 	});
 }

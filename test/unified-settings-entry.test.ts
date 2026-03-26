@@ -13,6 +13,7 @@ function createControllerDeps() {
 		promptSettingsHub: vi.fn(),
 		configureDashboardDisplaySettings: vi.fn(),
 		configureStatuslineSettings: vi.fn(),
+		promptStartupSettings: vi.fn(),
 		promptBehaviorSettings: vi.fn(),
 		promptThemeSettings: vi.fn(),
 		dashboardSettingsEqual: vi.fn(),
@@ -21,6 +22,7 @@ function createControllerDeps() {
 		backendSettingsEqual: vi.fn(),
 		persistBackendConfigSelection: vi.fn(),
 		configureBackendSettings: vi.fn(),
+		STARTUP_PANEL_KEYS: [],
 		BEHAVIOR_PANEL_KEYS: [],
 		THEME_PANEL_KEYS: [],
 	};

@@ -87,6 +87,7 @@ import {
 	promptBehaviorSettingsPanelEntry,
 	promptDashboardDisplaySettingsPanelEntry,
 	promptStatuslineSettingsPanelEntry,
+	promptStartupSettingsPanelEntry,
 	promptThemeSettingsPanelEntry,
 	reorderStatuslineField,
 } from "./settings-panels.js";
@@ -104,6 +105,7 @@ import {
 import { withQueuedRetry } from "./settings-write-queue.js";
 
 import { promptStatuslineSettingsPanel } from "./statusline-settings-panel.js";
+import { promptStartupSettingsPanel } from "./startup-settings-panel.js";
 import { promptThemeSettingsPanel } from "./theme-settings-panel.js";
 import {
 	configureUnifiedSettingsController,
@@ -198,6 +200,7 @@ const ACCENT_COLOR_OPTIONS: DashboardAccentColor[] = [
 type SettingsHubAction =
 	| { type: "account-list" }
 	| { type: "summary-fields" }
+	| { type: "startup" }
 	| { type: "behavior" }
 	| { type: "theme" }
 	| { type: "experimental" }
@@ -225,10 +228,12 @@ const ACCOUNT_LIST_PANEL_KEYS = [
 const STATUSLINE_PANEL_KEYS = [
 	"menuStatuslineFields",
 ] as const satisfies readonly DashboardSettingKey[];
+const STARTUP_PANEL_KEYS = [
+	"autoPickBestAccountOnLaunch",
+] as const satisfies readonly DashboardSettingKey[];
 const BEHAVIOR_PANEL_KEYS = [
 	"actionAutoReturnMs",
 	"actionPauseOnKey",
-	"autoPickBestAccountOnLaunch",
 	"menuAutoFetchLimits",
 	"menuShowFetchStatus",
 	"menuQuotaTtlMs",
@@ -450,6 +455,7 @@ const __testOnly = {
 	reorderField: reorderStatuslineField,
 	promptDashboardDisplaySettings,
 	promptStatuslineSettings,
+	promptStartupSettings,
 	promptBehaviorSettings,
 	promptThemeSettings,
 	promptBackendSettings,
@@ -512,6 +518,19 @@ async function promptStatuslineSettings(
 		applyDashboardDefaultsForKeys,
 		STATUSLINE_FIELD_OPTIONS,
 		STATUSLINE_PANEL_KEYS,
+		UI_COPY,
+	});
+}
+
+async function promptStartupSettings(
+	initial: DashboardDisplaySettings,
+): Promise<DashboardDisplaySettings | null> {
+	return promptStartupSettingsPanelEntry({
+		initial,
+		promptStartupSettingsPanel,
+		cloneDashboardSettings,
+		applyDashboardDefaultsForKeys,
+		STARTUP_PANEL_KEYS,
 		UI_COPY,
 	});
 }
@@ -788,6 +807,7 @@ async function configureUnifiedSettings(
 			promptSettingsHub(focus as SettingsHubActionType),
 		configureDashboardDisplaySettings,
 		configureStatuslineSettings,
+		promptStartupSettings,
 		promptBehaviorSettings,
 		promptThemeSettings,
 		dashboardSettingsEqual,
@@ -796,6 +816,7 @@ async function configureUnifiedSettings(
 		backendSettingsEqual,
 		persistBackendConfigSelection,
 		configureBackendSettings,
+		STARTUP_PANEL_KEYS,
 		BEHAVIOR_PANEL_KEYS,
 		THEME_PANEL_KEYS,
 	});

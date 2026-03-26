@@ -8,6 +8,7 @@ const copy = {
 	sectionTitle: "Sections",
 	accountList: "Account list",
 	summaryFields: "Summary fields",
+	startup: "Startup",
 	behavior: "Behavior",
 	theme: "Theme",
 	advancedTitle: "Advanced",
@@ -21,6 +22,7 @@ describe("settings hub menu helpers", () => {
 	it("builds the expected menu skeleton", () => {
 		const items = buildSettingsHubItems(copy);
 		expect(items.map((item) => item.label)).toContain("Account list");
+		expect(items.map((item) => item.label)).toContain("Startup");
 		expect(items.map((item) => item.label)).toContain("Experimental");
 		expect(items.at(-1)?.label).toBe("Back");
 	});
@@ -28,6 +30,6 @@ describe("settings hub menu helpers", () => {
 	it("finds the initial cursor for selectable actions", () => {
 		const items = buildSettingsHubItems(copy);
 		expect(findSettingsHubInitialCursor(items, "account-list")).toBe(1);
-		expect(findSettingsHubInitialCursor(items, "backend")).toBe(8);
+		expect(findSettingsHubInitialCursor(items, "backend")).toBe(9);
 	});
 });

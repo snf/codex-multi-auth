@@ -59,6 +59,9 @@ type SettingsHubTestApi = {
 	promptStatuslineSettings: (
 		initial: DashboardDisplaySettings,
 	) => Promise<DashboardDisplaySettings | null>;
+	promptStartupSettings: (
+		initial: DashboardDisplaySettings,
+	) => Promise<DashboardDisplaySettings | null>;
 	promptBehaviorSettings: (
 		initial: DashboardDisplaySettings,
 	) => Promise<DashboardDisplaySettings | null>;
@@ -709,13 +712,13 @@ describe("settings-hub utility coverage", () => {
 			expect(selected?.actionPauseOnKey).toBe(false);
 		});
 
-		it("toggles auto-pick best account on launch before returning the draft", async () => {
+		it("toggles startup settings before returning the draft", async () => {
 			const api = await loadSettingsHubTestApi();
 			queueSelectResults(
 				{ type: "toggle-auto-pick-best-account-on-launch" },
 				{ type: "save" },
 			);
-			const selected = await api.promptBehaviorSettings({
+			const selected = await api.promptStartupSettings({
 				...DEFAULT_DASHBOARD_DISPLAY_SETTINGS,
 			});
 			expect(selected?.autoPickBestAccountOnLaunch).toBe(true);

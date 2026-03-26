@@ -4,7 +4,10 @@ import type { DashboardDisplaySettings } from "../lib/dashboard-settings.js";
 import type { PluginConfig } from "../lib/types.js";
 
 function createSettings(): DashboardDisplaySettings {
-	return { menuShowStatusBadge: true };
+	return {
+		menuShowStatusBadge: true,
+		autoPickBestAccountOnLaunch: false,
+	};
 }
 
 function createConfig(): PluginConfig {
@@ -22,6 +25,7 @@ describe("unified settings controller", () => {
 			promptSettingsHub: async () => null,
 			configureDashboardDisplaySettings: async (current) => current,
 			configureStatuslineSettings: async (current) => current,
+			promptStartupSettings: async () => null,
 			promptBehaviorSettings: async () => null,
 			promptThemeSettings: async () => null,
 			dashboardSettingsEqual: () => true,
@@ -30,6 +34,7 @@ describe("unified settings controller", () => {
 			backendSettingsEqual: () => true,
 			persistBackendConfigSelection: vi.fn(),
 			configureBackendSettings: async (config) => config,
+			STARTUP_PANEL_KEYS: [],
 			BEHAVIOR_PANEL_KEYS: [],
 			THEME_PANEL_KEYS: [],
 		});
@@ -60,6 +65,7 @@ describe("unified settings controller", () => {
 			promptSettingsHub,
 			configureDashboardDisplaySettings,
 			configureStatuslineSettings: async (current) => current,
+			promptStartupSettings: async () => null,
 			promptBehaviorSettings: async () => null,
 			promptThemeSettings: async () => null,
 			dashboardSettingsEqual: () => true,
@@ -68,6 +74,7 @@ describe("unified settings controller", () => {
 			backendSettingsEqual: () => true,
 			persistBackendConfigSelection: vi.fn(),
 			configureBackendSettings,
+			STARTUP_PANEL_KEYS: [],
 			BEHAVIOR_PANEL_KEYS: [],
 			THEME_PANEL_KEYS: [],
 		});
@@ -79,7 +86,7 @@ describe("unified settings controller", () => {
 		expect(result.menuShowStatusBadge).toBe(false);
 	});
 
-	it("persists behavior, theme, and experimental changes when selections differ", async () => {
+	it("persists startup, behavior, theme, and experimental changes when selections differ", async () => {
 		const persistDashboardSettingsSelection = vi.fn(
 			async (selected: DashboardDisplaySettings) => selected,
 		);
@@ -89,6 +96,7 @@ describe("unified settings controller", () => {
 		const applyUiThemeFromDashboardSettings = vi.fn();
 		const promptSettingsHub = vi
 			.fn()
+			.mockResolvedValueOnce({ type: "startup" })
 			.mockResolvedValueOnce({ type: "behavior" })
 			.mockResolvedValueOnce({ type: "theme" })
 			.mockResolvedValueOnce({ type: "experimental" })
@@ -103,21 +111,42 @@ describe("unified settings controller", () => {
 			promptSettingsHub,
 			configureDashboardDisplaySettings: async (current) => current,
 			configureStatuslineSettings: async (current) => current,
-			promptBehaviorSettings: async () => ({ menuShowStatusBadge: false }),
-			promptThemeSettings: async () => ({ menuShowStatusBadge: true }),
+			promptStartupSettings: async () => ({
+				menuShowStatusBadge: true,
+				autoPickBestAccountOnLaunch: true,
+			}),
+			promptBehaviorSettings: async () => ({
+				menuShowStatusBadge: false,
+				autoPickBestAccountOnLaunch: true,
+			}),
+			promptThemeSettings: async () => ({
+				menuShowStatusBadge: true,
+				autoPickBestAccountOnLaunch: true,
+			}),
 			dashboardSettingsEqual: (left, right) =>
-				left.menuShowStatusBadge === right.menuShowStatusBadge,
+				left.menuShowStatusBadge === right.menuShowStatusBadge &&
+				left.autoPickBestAccountOnLaunch === right.autoPickBestAccountOnLaunch,
 			persistDashboardSettingsSelection,
 			promptExperimentalSettings: async () => ({ fetchTimeoutMs: 2000 }),
 			backendSettingsEqual: (left, right) =>
 				left.fetchTimeoutMs === right.fetchTimeoutMs,
 			persistBackendConfigSelection,
 			configureBackendSettings: async (config) => config,
+			STARTUP_PANEL_KEYS: ["autoPickBestAccountOnLaunch"],
 			BEHAVIOR_PANEL_KEYS: ["menuShowStatusBadge"],
 			THEME_PANEL_KEYS: ["menuShowStatusBadge"],
 		});
 
-		expect(persistDashboardSettingsSelection).toHaveBeenCalledTimes(2);
+		expect(persistDashboardSettingsSelection).toHaveBeenCalledTimes(3);
+		expect(persistDashboardSettingsSelection).toHaveBeenNthCalledWith(
+			1,
+			{
+				menuShowStatusBadge: true,
+				autoPickBestAccountOnLaunch: true,
+			},
+			["autoPickBestAccountOnLaunch"],
+			"startup",
+		);
 		expect(persistBackendConfigSelection).toHaveBeenCalledWith(
 			{ fetchTimeoutMs: 2000 },
 			"experimental",

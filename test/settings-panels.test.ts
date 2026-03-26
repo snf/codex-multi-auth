@@ -4,6 +4,7 @@ import {
 	promptBehaviorSettingsPanelEntry,
 	promptDashboardDisplaySettingsPanelEntry,
 	promptStatuslineSettingsPanelEntry,
+	promptStartupSettingsPanelEntry,
 	promptThemeSettingsPanelEntry,
 	reorderStatuslineField,
 } from "../lib/codex-manager/settings-panels.js";
@@ -139,6 +140,30 @@ describe("settings panel helpers", () => {
 		});
 
 		expect(promptBehaviorSettingsPanel).toHaveBeenCalledOnce();
+		expect(result).toEqual(initial);
+	});
+
+	it("passes startup panel dependencies through", async () => {
+		const initial = { ...DEFAULT_DASHBOARD_DISPLAY_SETTINGS };
+		const cloneDashboardSettings = vi.fn((value) => ({ ...value }));
+		const applyDashboardDefaultsForKeys = vi.fn(() => initial);
+		const promptStartupSettingsPanel = vi.fn(async (_value, deps) => {
+			expect(_value).toEqual(initial);
+			expect(deps.cloneDashboardSettings).toBe(cloneDashboardSettings);
+			expect(deps.applyDashboardDefaultsForKeys).toBe(applyDashboardDefaultsForKeys);
+			return initial;
+		});
+
+		const result = await promptStartupSettingsPanelEntry({
+			initial,
+			promptStartupSettingsPanel,
+			cloneDashboardSettings,
+			applyDashboardDefaultsForKeys,
+			STARTUP_PANEL_KEYS: [] as never,
+			UI_COPY: {} as never,
+		});
+
+		expect(promptStartupSettingsPanel).toHaveBeenCalledOnce();
 		expect(result).toEqual(initial);
 	});
 

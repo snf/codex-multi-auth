@@ -4,6 +4,7 @@ import type { PluginConfig } from "../types.js";
 export type SettingsHubActionType =
 	| "account-list"
 	| "summary-fields"
+	| "startup"
 	| "behavior"
 	| "theme"
 	| "experimental"
@@ -29,6 +30,9 @@ export type UnifiedSettingsControllerDeps = {
 	configureStatuslineSettings: (
 		current: DashboardDisplaySettings,
 	) => Promise<DashboardDisplaySettings>;
+	promptStartupSettings: (
+		current: DashboardDisplaySettings,
+	) => Promise<DashboardDisplaySettings | null>;
 	promptBehaviorSettings: (
 		current: DashboardDisplaySettings,
 	) => Promise<DashboardDisplaySettings | null>;
@@ -53,6 +57,7 @@ export type UnifiedSettingsControllerDeps = {
 		scope: string,
 	) => Promise<PluginConfig>;
 	configureBackendSettings: (config: PluginConfig) => Promise<PluginConfig>;
+	STARTUP_PANEL_KEYS: readonly (keyof DashboardDisplaySettings)[];
 	BEHAVIOR_PANEL_KEYS: readonly (keyof DashboardDisplaySettings)[];
 	THEME_PANEL_KEYS: readonly (keyof DashboardDisplaySettings)[];
 };
@@ -81,6 +86,17 @@ export async function configureUnifiedSettingsController(
 		}
 		if (action.type === "summary-fields") {
 			current = await deps.configureStatuslineSettings(current);
+			continue;
+		}
+		if (action.type === "startup") {
+			const selected = await deps.promptStartupSettings(current);
+			if (selected && !deps.dashboardSettingsEqual(current, selected)) {
+				current = await deps.persistDashboardSettingsSelection(
+					selected,
+					deps.STARTUP_PANEL_KEYS,
+					"startup",
+				);
+			}
 			continue;
 		}
 		if (action.type === "behavior") {

@@ -431,6 +431,7 @@ type SettingsHubMenuItem = {
 const SETTINGS_HUB_MENU_ORDER = [
 	"account-list",
 	"summary-fields",
+	"startup",
 	"behavior",
 	"theme",
 	"experimental",
@@ -440,6 +441,7 @@ const SETTINGS_HUB_MENU_ORDER = [
 const BASELINE_SETTINGS_HUB_PANELS = [
 	"account-list",
 	"summary-fields",
+	"startup",
 	"behavior",
 	"theme",
 	"backend",
@@ -558,6 +560,14 @@ function createSettingsCancelSequence(
 		return [
 			{ type: panel },
 			{ type: "toggle-pause" },
+			triggerSettingsHotkey("q"),
+			{ type: "back" },
+		];
+	}
+	if (panel === "startup") {
+		return [
+			{ type: panel },
+			{ type: "toggle-auto-pick-best-account-on-launch" },
 			triggerSettingsHotkey("q"),
 			{ type: "back" },
 		];
@@ -7742,6 +7752,9 @@ describe("codex manager cli commands", () => {
 			{ type: "summary-fields" },
 			{ type: "move-down", key: "last-used" },
 			{ type: "toggle", key: "status" },
+			{ type: "save" },
+			{ type: "startup" },
+			{ type: "toggle-auto-pick-best-account-on-launch" },
 			{ type: "save" },
 			{ type: "behavior" },
 			{ type: "toggle-pause" },
