@@ -102,7 +102,7 @@
 		"vendor:verify": "node scripts/verify-vendor-provenance.mjs",
 		"vendor:update-manifest": "node scripts/update-vendor-provenance.mjs",
 		"prepublishOnly": "npm run build",
-		"prepare": "husky"
+		"prepare": "node scripts/prepare.js"
 	},
 	"bin": {
 		"codex": "scripts/codex.js",
@@ -156,8 +156,7 @@
 		"@openauthjs/openauth": "^0.4.3",
 		"hono": "4.12.6",
 		"undici": "^6.24.1",
-		"zod": "^4.3.6",
-		"husky": "^9.1.7"
+		"zod": "^4.3.6"
 	},
 	"overrides": {
 		"hono": "4.12.6",
