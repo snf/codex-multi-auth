@@ -70,6 +70,8 @@ function statusBadge(status) {
                 return withTone("rate-limited", "warning");
             case "cooldown":
                 return withTone("cooldown", "warning");
+            case "workspace-disabled":
+                return withTone("workspace disabled", "danger");
             case "flagged":
                 return withTone("flagged", "danger");
             case "disabled":
@@ -89,6 +91,8 @@ function statusBadge(status) {
             return withTone("rate-limited", "warning");
         case "cooldown":
             return withTone("cooldown", "warning");
+        case "workspace-disabled":
+            return withTone("workspace disabled", "danger");
         case "flagged":
             return withTone("flagged", "danger");
         case "disabled":
@@ -128,6 +132,7 @@ function accountRowColor(account) {
         case "rate-limited":
         case "cooldown":
             return "yellow";
+        case "workspace-disabled":
         case "disabled":
         case "error":
         case "flagged":
@@ -144,6 +149,7 @@ function statusTone(status) {
         case "rate-limited":
         case "cooldown":
             return "warning";
+        case "workspace-disabled":
         case "disabled":
         case "error":
         case "flagged":
@@ -153,6 +159,9 @@ function statusTone(status) {
     }
 }
 function statusText(status) {
+    if (status === "workspace-disabled") {
+        return "workspace disabled";
+    }
     return status ?? "unknown";
 }
 function normalizeQuotaPercent(value) {

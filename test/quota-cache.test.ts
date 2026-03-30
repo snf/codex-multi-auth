@@ -63,6 +63,36 @@ describe("quota cache", () => {
     expect(fileContent).toContain('"version": 1');
   });
 
+  it("preserves probe issue metadata when saving and loading cache entries", async () => {
+    const { loadQuotaCache, saveQuotaCache } =
+      await import("../lib/quota-cache.js");
+
+    await saveQuotaCache({
+      byAccountId: {
+        acc_1: {
+          updatedAt: Date.now(),
+          status: 403,
+          model: "gpt-5-codex",
+          primary: {},
+          secondary: {},
+          issueKind: "workspace-disabled",
+          issueCode: "deactivated_workspace",
+          issueMessage: "workspace deactivated",
+        },
+      },
+      byEmail: {},
+    });
+
+    const loaded = await loadQuotaCache();
+    expect(loaded.byAccountId.acc_1).toEqual(
+      expect.objectContaining({
+        issueKind: "workspace-disabled",
+        issueCode: "deactivated_workspace",
+        issueMessage: "workspace deactivated",
+      }),
+    );
+  });
+
   it("ignores cache files with unsupported version", async () => {
     const { loadQuotaCache, getQuotaCachePath } =
       await import("../lib/quota-cache.js");

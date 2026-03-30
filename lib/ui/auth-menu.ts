@@ -12,6 +12,7 @@ export type AccountStatus =
 	| "ok"
 	| "rate-limited"
 	| "cooldown"
+	| "workspace-disabled"
 	| "disabled"
 	| "error"
 	| "flagged"
@@ -129,6 +130,8 @@ function statusBadge(status: AccountStatus | undefined): string {
 				return withTone("rate-limited", "warning");
 			case "cooldown":
 				return withTone("cooldown", "warning");
+			case "workspace-disabled":
+				return withTone("workspace disabled", "danger");
 			case "flagged":
 				return withTone("flagged", "danger");
 			case "disabled":
@@ -149,6 +152,8 @@ function statusBadge(status: AccountStatus | undefined): string {
 			return withTone("rate-limited", "warning");
 		case "cooldown":
 			return withTone("cooldown", "warning");
+		case "workspace-disabled":
+			return withTone("workspace disabled", "danger");
 		case "flagged":
 			return withTone("flagged", "danger");
 		case "disabled":
@@ -191,6 +196,7 @@ function accountRowColor(account: AccountInfo): MenuItem<AuthMenuAction>["color"
 		case "rate-limited":
 		case "cooldown":
 			return "yellow";
+		case "workspace-disabled":
 		case "disabled":
 		case "error":
 		case "flagged":
@@ -208,6 +214,7 @@ function statusTone(status: AccountStatus | undefined): "success" | "warning" | 
 		case "rate-limited":
 		case "cooldown":
 			return "warning";
+		case "workspace-disabled":
 		case "disabled":
 		case "error":
 		case "flagged":
@@ -218,6 +225,9 @@ function statusTone(status: AccountStatus | undefined): "success" | "warning" | 
 }
 
 function statusText(status: AccountStatus | undefined): string {
+	if (status === "workspace-disabled") {
+		return "workspace disabled";
+	}
 	return status ?? "unknown";
 }
 

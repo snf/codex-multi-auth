@@ -323,6 +323,7 @@ export function isWorkspaceDisabledError(
                 "workspace_disabled",
                 "workspace_expired",
                 "workspace_terminated",
+                "deactivated_workspace",
                 "account_disabled",
                 "account_expired",
                 "organization_disabled",
@@ -1245,5 +1246,4 @@ function extractErrorDiagnostics(
 
         return Object.keys(diagnostics).length > 0 ? diagnostics : undefined;
 }
-
 

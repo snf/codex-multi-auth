@@ -26,6 +26,7 @@ import { evaluateForecastAccounts, recommendForecastAccount, summarizeForecast, 
 import { createLogger } from "./logger.js";
 import { MODEL_FAMILIES } from "./prompts/codex.js";
 import { getModelCapabilities, getModelProfile, resolveNormalizedModel, } from "./request/helpers/model-map.js";
+import { isWorkspaceDisabledError } from "./request/fetch-helpers.js";
 import { loadQuotaCache, saveQuotaCache, } from "./quota-cache.js";
 import { fetchCodexQuotaSnapshot, formatQuotaSnapshotLine, } from "./quota-probe.js";
 import { queuedRefresh } from "./refresh-queue.js";
@@ -111,6 +112,27 @@ function extractErrorMessageFromPayload(payload) {
     }
     return undefined;
 }
+function extractErrorCodeFromPayload(payload) {
+    if (!payload || typeof payload !== "object")
+        return undefined;
+    const record = payload;
+    const directCode = typeof record.code === "string" ? collapseWhitespace(record.code) : "";
+    if (directCode)
+        return directCode;
+    const nestedError = record.error;
+    if (nestedError && typeof nestedError === "object") {
+        const nestedCode = extractErrorCodeFromPayload(nestedError);
+        if (nestedCode)
+            return nestedCode;
+    }
+    const nestedDetail = record.detail;
+    if (nestedDetail && typeof nestedDetail === "object") {
+        const nestedCode = extractErrorCodeFromPayload(nestedDetail);
+        if (nestedCode)
+            return nestedCode;
+    }
+    return undefined;
+}
 function parseStructuredErrorMessage(raw) {
     const trimmed = raw.trim();
     if (!trimmed)
@@ -134,6 +156,29 @@ function parseStructuredErrorMessage(raw) {
     }
     return undefined;
 }
+function parseStructuredErrorCode(raw) {
+    const trimmed = raw.trim();
+    if (!trimmed)
+        return undefined;
+    const candidates = new Set([trimmed]);
+    const firstBrace = trimmed.indexOf("{");
+    const lastBrace = trimmed.lastIndexOf("}");
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+        candidates.add(trimmed.slice(firstBrace, lastBrace + 1));
+    }
+    for (const candidate of candidates) {
+        try {
+            const parsed = JSON.parse(candidate);
+            const code = extractErrorCodeFromPayload(parsed);
+            if (code)
+                return code;
+        }
+        catch {
+            // ignore non-JSON candidates
+        }
+    }
+    return undefined;
+}
 function normalizeFailureDetail(message, reason) {
     const reasonLabel = formatReasonLabel(reason);
     const raw = message?.trim() || reasonLabel || "refresh failed";
@@ -141,6 +186,36 @@ function normalizeFailureDetail(message, reason) {
     const normalized = collapseWhitespace(structured ?? raw);
     const bounded = normalized.length > 260 ? `${normalized.slice(0, 257)}...` : normalized;
     return bounded.length > 0 ? bounded : "refresh failed";
+}
+function normalizeIssueCode(code) {
+    if (!code)
+        return undefined;
+    const normalized = collapseWhitespace(code).toLowerCase();
+    return normalized.length > 0 ? normalized : undefined;
+}
+function formatWorkspaceIssueMessage(code) {
+    switch (normalizeIssueCode(code)) {
+        case "deactivated_workspace":
+            return "workspace deactivated";
+        case "workspace_expired":
+            return "workspace expired";
+        case "workspace_terminated":
+            return "workspace terminated";
+        default:
+            return "workspace disabled";
+    }
+}
+function classifyLiveProbeIssue(error) {
+    const raw = error instanceof Error ? error.message : String(error);
+    const code = normalizeIssueCode(parseStructuredErrorCode(raw));
+    if (!isWorkspaceDisabledError(403, code, raw)) {
+        return null;
+    }
+    return {
+        kind: "workspace-disabled",
+        code,
+        message: formatWorkspaceIssueMessage(code),
+    };
 }
 function joinStyledSegments(parts) {
     if (parts.length === 0)
@@ -461,7 +536,17 @@ function formatCompactQuotaSnapshot(snapshot) {
     }
     return formatQuotaSnapshotLine(snapshot);
 }
+function formatQuotaIssueSummary(entry) {
+    if (entry.issueKind === "workspace-disabled") {
+        return entry.issueMessage ?? formatWorkspaceIssueMessage(entry.issueCode);
+    }
+    return null;
+}
 function formatAccountQuotaSummary(entry) {
+    const issueSummary = formatQuotaIssueSummary(entry);
+    if (issueSummary) {
+        return issueSummary;
+    }
     const parts = [
         formatCompactQuotaPart(entry.primary.windowMinutes, entry.primary.usedPercent),
         formatCompactQuotaPart(entry.secondary.windowMinutes, entry.secondary.usedPercent),
@@ -505,6 +590,37 @@ function updateQuotaCacheForAccount(cache, account, snapshot, accounts, emailFal
             windowMinutes: snapshot.secondary.windowMinutes,
             resetAtMs: snapshot.secondary.resetAtMs,
         },
+    };
+    let changed = false;
+    const accountId = normalizeQuotaAccountId(account.accountId);
+    const hasUniqueAccountId = accountId !== null && hasUniqueQuotaAccountId(accounts, account);
+    if (hasUniqueAccountId) {
+        cache.byAccountId[accountId] = nextEntry;
+        changed = true;
+    }
+    const email = normalizeQuotaEmail(account.email);
+    if (email &&
+        hasSafeQuotaEmailFallback(emailFallbackState, account) &&
+        !hasUniqueAccountId) {
+        cache.byEmail[email] = nextEntry;
+        changed = true;
+    }
+    else if (email && cache.byEmail[email]) {
+        delete cache.byEmail[email];
+        changed = true;
+    }
+    return changed;
+}
+function updateQuotaCacheIssueForAccount(cache, account, issue, accounts, model, emailFallbackState = buildQuotaEmailFallbackState(accounts)) {
+    const nextEntry = {
+        updatedAt: Date.now(),
+        status: 403,
+        model,
+        primary: {},
+        secondary: {},
+        issueKind: issue.kind,
+        issueCode: issue.code,
+        issueMessage: issue.message,
     };
     let changed = false;
     const accountId = normalizeQuotaAccountId(account.accountId);
@@ -624,8 +740,14 @@ async function refreshQuotaCacheForMenu(storage, cache, maxAgeMs, onProgress) {
             changed =
                 updateQuotaCacheForAccount(nextCache, target.account, snapshot, storage.accounts, emailFallbackState) || changed;
         }
-        catch {
-            // Keep existing cached values if probing fails.
+        catch (error) {
+            const issue = classifyLiveProbeIssue(error);
+            if (!issue) {
+                // Keep existing cached values if probing fails.
+                continue;
+            }
+            changed =
+                updateQuotaCacheIssueForAccount(nextCache, target.account, issue, storage.accounts, MENU_QUOTA_REFRESH_MODEL, emailFallbackState) || changed;
         }
     }
     if (changed) {
@@ -650,13 +772,15 @@ function hasLikelyInvalidRefreshToken(refreshToken) {
         return true;
     return trimmed.startsWith("token-");
 }
-function mapAccountStatus(account, index, activeIndex, now) {
+function mapAccountStatus(account, index, activeIndex, now, issueKind) {
     if (account.enabled === false)
         return "disabled";
     if (typeof account.coolingDownUntil === "number" &&
         account.coolingDownUntil > now) {
         return "cooldown";
     }
+    if (issueKind === "workspace-disabled")
+        return "workspace-disabled";
     const rateLimit = formatRateLimitEntry(account, now, "codex");
     if (rateLimit)
         return "rate-limited";
@@ -692,6 +816,7 @@ function accountStatusSortBucket(status) {
         case "cooldown":
         case "rate-limited":
             return 2;
+        case "workspace-disabled":
         case "disabled":
         case "error":
         case "flagged":
@@ -767,7 +892,7 @@ function toExistingAccountInfo(storage, quotaCache, displaySettings) {
             email: account.email,
             addedAt: account.addedAt,
             lastUsed: account.lastUsed,
-            status: mapAccountStatus(account, index, activeIndex, now),
+            status: mapAccountStatus(account, index, activeIndex, now, entry?.issueKind),
             quotaSummary: (displaySettings.menuShowQuotaSummary ?? true) && entry
                 ? formatAccountQuotaSummary(entry)
                 : undefined,
@@ -1580,6 +1705,11 @@ async function runHealthCheck(options = {}) {
                         healthDetail = formatQuotaSnapshotForDashboard(snapshot, display);
                     }
                     catch (error) {
+                        const issue = classifyLiveProbeIssue(error);
+                        if (issue && workingQuotaCache) {
+                            quotaCacheChanged =
+                                updateQuotaCacheIssueForAccount(workingQuotaCache, account, issue, storage.accounts, modelInspection.normalized, quotaEmailFallbackState ?? undefined) || quotaCacheChanged;
+                        }
                         const message = normalizeFailureDetail(error instanceof Error ? error.message : String(error), undefined);
                         warnings += 1;
                         healthDetail = `signed in and working (live check failed: ${message})`;
@@ -1658,6 +1788,11 @@ async function runHealthCheck(options = {}) {
                         healthyMessage = formatQuotaSnapshotForDashboard(snapshot, display);
                     }
                     catch (error) {
+                        const issue = classifyLiveProbeIssue(error);
+                        if (issue && workingQuotaCache) {
+                            quotaCacheChanged =
+                                updateQuotaCacheIssueForAccount(workingQuotaCache, account, issue, storage.accounts, modelInspection.normalized, quotaEmailFallbackState ?? undefined) || quotaCacheChanged;
+                        }
                         const message = normalizeFailureDetail(error instanceof Error ? error.message : String(error), undefined);
                         warnings += 1;
                         healthyMessage = `working now (live check failed: ${message})`;

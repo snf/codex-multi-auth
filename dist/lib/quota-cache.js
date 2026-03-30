@@ -57,6 +57,13 @@ function normalizeEntry(value) {
         model.trim().length === 0) {
         return null;
     }
+    const issueKind = value.issueKind === "workspace-disabled" ? "workspace-disabled" : undefined;
+    const issueCode = typeof value.issueCode === "string" && value.issueCode.trim().length > 0
+        ? value.issueCode.trim()
+        : undefined;
+    const issueMessage = typeof value.issueMessage === "string" && value.issueMessage.trim().length > 0
+        ? value.issueMessage.trim()
+        : undefined;
     return {
         updatedAt,
         status,
@@ -64,6 +71,9 @@ function normalizeEntry(value) {
         planType: typeof value.planType === "string" ? value.planType : undefined,
         primary: normalizeWindow(value.primary),
         secondary: normalizeWindow(value.secondary),
+        issueKind,
+        issueCode,
+        issueMessage,
     };
 }
 /**

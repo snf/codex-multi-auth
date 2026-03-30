@@ -213,6 +213,7 @@ export function isWorkspaceDisabledError(status, code, bodyText) {
         "workspace_disabled",
         "workspace_expired",
         "workspace_terminated",
+        "deactivated_workspace",
         "account_disabled",
         "account_expired",
         "organization_disabled",

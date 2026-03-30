@@ -515,6 +515,10 @@ describe('isWorkspaceDisabledError', () => {
 		expect(isWorkspaceDisabledError(403, 'workspace_expired', 'Some message')).toBe(true);
 	});
 
+	it('returns true for deactivated_workspace error code', () => {
+		expect(isWorkspaceDisabledError(403, 'deactivated_workspace', '')).toBe(true);
+	});
+
 	it('returns true for account_disabled error code', () => {
 		expect(isWorkspaceDisabledError(403, 'account_disabled', '')).toBe(true);
 	});

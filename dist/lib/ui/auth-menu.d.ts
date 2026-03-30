@@ -1,5 +1,5 @@
 import { isTTY } from "./ansi.js";
-export type AccountStatus = "active" | "ok" | "rate-limited" | "cooldown" | "disabled" | "error" | "flagged" | "unknown";
+export type AccountStatus = "active" | "ok" | "rate-limited" | "cooldown" | "workspace-disabled" | "disabled" | "error" | "flagged" | "unknown";
 export interface AccountInfo {
     index: number;
     sourceIndex?: number;

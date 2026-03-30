@@ -3038,6 +3038,57 @@ describe("codex manager cli commands", () => {
 		).toBe(true);
 	});
 
+	it("persists workspace-disabled probe issues during auth check", async () => {
+		const now = Date.now();
+		loadAccountsMock.mockResolvedValueOnce({
+			version: 3,
+			activeIndex: 0,
+			activeIndexByFamily: { codex: 0 },
+			accounts: [
+				{
+					accountId: "workspace-disabled",
+					email: "disabled@example.com",
+					refreshToken: "refresh-disabled",
+					accessToken: "access-disabled",
+					expiresAt: now + 60 * 60 * 1000,
+					addedAt: now - 1_000,
+					lastUsed: now - 1_000,
+					enabled: true,
+				},
+			],
+		});
+		loadQuotaCacheMock.mockResolvedValueOnce({ byAccountId: {}, byEmail: {} });
+		fetchCodexQuotaSnapshotMock.mockRejectedValueOnce(
+			new Error('{"detail":{"code":"deactivated_workspace"}}'),
+		);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const { runCodexMultiAuthCli } = await import("../lib/codex-manager.js");
+
+		const exitCode = await runCodexMultiAuthCli(["auth", "check"]);
+		expect(exitCode).toBe(0);
+		expect(saveQuotaCacheMock).toHaveBeenCalledTimes(1);
+		expect(saveQuotaCacheMock).toHaveBeenCalledWith({
+			byAccountId: {
+				"workspace-disabled": {
+					updatedAt: expect.any(Number),
+					status: 403,
+					model: "gpt-5-codex",
+					primary: {},
+					secondary: {},
+					issueKind: "workspace-disabled",
+					issueCode: "deactivated_workspace",
+					issueMessage: "workspace deactivated",
+				},
+			},
+			byEmail: {},
+		});
+		expect(
+			logSpy.mock.calls.some((call) =>
+				String(call[0]).includes("live check failed"),
+			),
+		).toBe(true);
+	});
+
 	it("does not mutate loaded quota cache when live check account save fails", async () => {
 		const now = Date.now();
 		const originalQuotaCache = {
@@ -6349,6 +6400,65 @@ describe("codex manager cli commands", () => {
 		});
 	});
 
+	it("persists workspace-disabled probe issues discovered by menu auto-fetch", async () => {
+		const now = Date.now();
+		loadAccountsMock.mockResolvedValue({
+			version: 3,
+			activeIndex: 0,
+			activeIndexByFamily: { codex: 0 },
+			accounts: [
+				{
+					email: "disabled@example.com",
+					accountId: "workspace-disabled",
+					refreshToken: "refresh-disabled",
+					accessToken: "access-disabled",
+					expiresAt: now + 60 * 60 * 1000,
+					addedAt: now - 1_000,
+					lastUsed: now - 1_000,
+					enabled: true,
+				},
+			],
+		});
+		loadDashboardDisplaySettingsMock.mockResolvedValue({
+			showPerAccountRows: true,
+			showQuotaDetails: true,
+			showForecastReasons: true,
+			showRecommendations: true,
+			showLiveProbeNotes: true,
+			menuAutoFetchLimits: true,
+			menuSortEnabled: false,
+			menuSortMode: "manual",
+			menuSortPinCurrent: true,
+			menuSortQuickSwitchVisibleRow: true,
+		});
+		loadQuotaCacheMock.mockResolvedValue({ byAccountId: {}, byEmail: {} });
+		fetchCodexQuotaSnapshotMock.mockRejectedValueOnce(
+			new Error('{"detail":{"code":"deactivated_workspace"}}'),
+		);
+		promptLoginModeMock.mockResolvedValueOnce({ mode: "cancel" });
+
+		const { runCodexMultiAuthCli } = await import("../lib/codex-manager.js");
+		const exitCode = await runCodexMultiAuthCli(["auth", "login"]);
+
+		expect(exitCode).toBe(0);
+		expect(saveQuotaCacheMock).toHaveBeenCalledTimes(1);
+		expect(saveQuotaCacheMock).toHaveBeenCalledWith({
+			byAccountId: {
+				"workspace-disabled": {
+					updatedAt: expect.any(Number),
+					status: 403,
+					model: "gpt-5-codex",
+					primary: {},
+					secondary: {},
+					issueKind: "workspace-disabled",
+					issueCode: "deactivated_workspace",
+					issueMessage: "workspace deactivated",
+				},
+			},
+			byEmail: {},
+		});
+	});
+
 	it("writes multi-workspace quota cache entries by accountId when one email spans multiple workspaces", async () => {
 		const now = Date.now();
 		loadAccountsMock.mockResolvedValue({
@@ -7067,6 +7177,100 @@ describe("codex manager cli commands", () => {
 		expect(
 			firstCallAccounts.map((account) => account.quota5hLeftPercent),
 		).toEqual([100, 20]);
+	});
+
+	it("shows workspace-disabled status in the login menu when cached probe issues exist", async () => {
+		const now = Date.now();
+		loadAccountsMock.mockResolvedValue({
+			version: 3,
+			activeIndex: 0,
+			activeIndexByFamily: { codex: 0 },
+			accounts: [
+				{
+					email: "disabled@example.com",
+					accountId: "workspace-disabled",
+					refreshToken: "refresh-disabled",
+					accessToken: "access-disabled",
+					expiresAt: now + 3_600_000,
+					addedAt: now - 2_000,
+					lastUsed: now - 2_000,
+					enabled: true,
+				},
+				{
+					email: "healthy@example.com",
+					accountId: "workspace-healthy",
+					refreshToken: "refresh-healthy",
+					accessToken: "access-healthy",
+					expiresAt: now + 3_600_000,
+					addedAt: now - 1_000,
+					lastUsed: now - 1_000,
+					enabled: true,
+				},
+			],
+		});
+		loadDashboardDisplaySettingsMock.mockResolvedValue({
+			showPerAccountRows: true,
+			showQuotaDetails: true,
+			showForecastReasons: true,
+			showRecommendations: true,
+			showLiveProbeNotes: true,
+			menuAutoFetchLimits: false,
+			menuSortEnabled: true,
+			menuSortMode: "ready-first",
+			menuSortPinCurrent: false,
+			menuSortQuickSwitchVisibleRow: true,
+		});
+		loadQuotaCacheMock.mockResolvedValue({
+			byAccountId: {
+				"workspace-disabled": {
+					updatedAt: now,
+					status: 403,
+					model: "gpt-5-codex",
+					primary: {},
+					secondary: {},
+					issueKind: "workspace-disabled",
+					issueCode: "deactivated_workspace",
+					issueMessage: "workspace deactivated",
+				},
+				"workspace-healthy": {
+					updatedAt: now,
+					status: 200,
+					model: "gpt-5-codex",
+					primary: {
+						usedPercent: 10,
+						windowMinutes: 300,
+						resetAtMs: now + 1_000,
+					},
+					secondary: {
+						usedPercent: 10,
+						windowMinutes: 10080,
+						resetAtMs: now + 2_000,
+					},
+				},
+			},
+			byEmail: {},
+		});
+		promptLoginModeMock.mockResolvedValueOnce({ mode: "cancel" });
+
+		const { runCodexMultiAuthCli } = await import("../lib/codex-manager.js");
+		const exitCode = await runCodexMultiAuthCli(["auth", "login"]);
+
+		expect(exitCode).toBe(0);
+		const firstCallAccounts = promptLoginModeMock.mock.calls[0]?.[0] as Array<{
+			accountId?: string;
+			status?: string;
+			quotaSummary?: string;
+		}>;
+		expect(firstCallAccounts.map((account) => account.accountId)).toEqual([
+			"workspace-healthy",
+			"workspace-disabled",
+		]);
+		expect(firstCallAccounts[1]).toEqual(
+			expect.objectContaining({
+				status: "workspace-disabled",
+				quotaSummary: "workspace deactivated",
+			}),
+		);
 	});
 
 	it("uses source-number quick switch mapping when visible-row quick switch is disabled", async () => {

@@ -3,6 +3,7 @@ export interface QuotaCacheWindow {
     windowMinutes?: number;
     resetAtMs?: number;
 }
+export type QuotaCacheIssueKind = "workspace-disabled";
 export interface QuotaCacheEntry {
     updatedAt: number;
     status: number;
@@ -10,6 +11,9 @@ export interface QuotaCacheEntry {
     planType?: string;
     primary: QuotaCacheWindow;
     secondary: QuotaCacheWindow;
+    issueKind?: QuotaCacheIssueKind;
+    issueCode?: string;
+    issueMessage?: string;
 }
 export interface QuotaCacheData {
     byAccountId: Record<string, QuotaCacheEntry>;
