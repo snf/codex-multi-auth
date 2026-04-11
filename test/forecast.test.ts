@@ -298,6 +298,37 @@ describe("forecast helpers", () => {
 		).toBe(true);
 	});
 
+	it("does not treat an account with missing 7d quota data as ready", () => {
+		const now = 1_700_000_000_000;
+		const result = evaluateForecastAccount({
+			index: 2,
+			now,
+			isCurrent: false,
+			account: {
+				refreshToken: "refresh-3",
+				addedAt: now - 10_000,
+				lastUsed: now - 10_000,
+			},
+			liveQuota: {
+				status: 200,
+				model: "gpt-5-codex",
+				primary: {
+					usedPercent: 10,
+					windowMinutes: 300,
+					resetAtMs: now + 120_000,
+				},
+				secondary: {},
+			},
+		});
+
+		expect(result.availability).toBe("unavailable");
+		expect(
+			result.reasons.some((reason) =>
+				reason.includes("7d quota status unavailable"),
+			),
+		).toBe(true);
+	});
+
 	it("treats an account as delayed when 7d is available but 5h quota is exhausted", () => {
 		const now = 1_700_000_000_000;
 		const result = evaluateForecastAccount({
@@ -723,6 +754,47 @@ describe("forecast helpers", () => {
 					model: "gpt-5-codex",
 					primary: { usedPercent: 40, windowMinutes: 300 },
 					secondary: { usedPercent: 10, windowMinutes: 10080 },
+				},
+			},
+		]);
+
+		const recommendation = recommendForecastAccount(results);
+		expect(recommendation.recommendedIndex).toBe(1);
+	});
+
+	it("does not recommend an account with only 5h quota data over one with valid 7d headroom", () => {
+		const now = 1_700_000_000_000;
+		const results = evaluateForecastAccounts([
+			{
+				index: 0,
+				now,
+				isCurrent: false,
+				account: {
+					refreshToken: "a",
+					addedAt: now - 1_000,
+					lastUsed: now - 1_000,
+				},
+				liveQuota: {
+					status: 200,
+					model: "gpt-5-codex",
+					primary: { usedPercent: 0, windowMinutes: 300 },
+					secondary: {},
+				},
+			},
+			{
+				index: 1,
+				now,
+				isCurrent: false,
+				account: {
+					refreshToken: "b",
+					addedAt: now - 1_000,
+					lastUsed: now - 1_000,
+				},
+				liveQuota: {
+					status: 200,
+					model: "gpt-5-codex",
+					primary: { usedPercent: 40, windowMinutes: 300 },
+					secondary: { usedPercent: 20, windowMinutes: 10080 },
 				},
 			},
 		]);

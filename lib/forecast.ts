@@ -1,5 +1,5 @@
 import { formatAccountLabel, formatWaitTime } from "./accounts.js";
-import type { CodexQuotaSnapshot } from "./quota-probe.js";
+import type { CodexQuotaSnapshot, CodexQuotaWindow } from "./quota-probe.js";
 import type { AccountMetadataV3 } from "./storage.js";
 import type { TokenFailure } from "./types.js";
 
@@ -180,6 +180,17 @@ function getQuotaResetWaitMs(resetAtMs: number | undefined, now: number): number
 	return Math.max(0, Math.floor(resetAtMs - now));
 }
 
+function hasQuotaSignal(window: CodexQuotaWindow | undefined): boolean {
+	if (!window) return false;
+	return (
+		(typeof window.usedPercent === "number" && Number.isFinite(window.usedPercent)) ||
+		(typeof window.windowMinutes === "number" &&
+			Number.isFinite(window.windowMinutes) &&
+			window.windowMinutes > 0) ||
+		(typeof window.resetAtMs === "number" && Number.isFinite(window.resetAtMs))
+	);
+}
+
 function markQuotaUnavailable(
 	currentAvailability: ForecastAvailability,
 	waitMs: number,
@@ -272,6 +283,8 @@ export function evaluateForecastAccount(
 	if (quota) {
 		const primaryUsed = quota.primary.usedPercent ?? 0;
 		const secondaryUsed = quota.secondary.usedPercent ?? 0;
+		const hasPrimaryQuota = hasQuotaSignal(quota.primary);
+		const hasSecondaryQuota = hasQuotaSignal(quota.secondary);
 		const quotaPressure =
 			quota.status === 429 || primaryUsed >= 90 || secondaryUsed >= 90;
 
@@ -299,7 +312,16 @@ export function evaluateForecastAccount(
 
 		const wait5h = getQuotaResetWaitMs(quota.primary.resetAtMs, now);
 		const wait7d = getQuotaResetWaitMs(quota.secondary.resetAtMs, now);
-		if (typeof remainingPercent7d === "number" && remainingPercent7d <= 0) {
+		if (hasPrimaryQuota && !hasSecondaryQuota) {
+			waitMs = Math.max(waitMs, wait7d);
+			availability = markQuotaUnavailable(availability, wait7d);
+			riskScore += 60;
+			reasons.push("7d quota status unavailable");
+			appendWaitReason(reasons, "7d quota resets in", wait7d);
+		} else if (
+			typeof remainingPercent7d === "number" &&
+			remainingPercent7d <= 0
+		) {
 			waitMs = Math.max(waitMs, wait7d);
 			availability = markQuotaUnavailable(availability, wait7d);
 			reasons.push("7d quota unavailable now");
