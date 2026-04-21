@@ -1,4 +1,5 @@
 import { maskEmail } from "../logger.js";
+import { classifyRefreshFailureForReauth, clearAccountReauthRequired, markAccountReauthRequired, } from "../account-reauth.js";
 export async function runRuntimeAccountCheck(deepProbe, deps) {
     const loadedStorage = await deps.hydrateEmails(await deps.loadAccounts());
     const workingStorage = loadedStorage
@@ -64,6 +65,10 @@ export async function runRuntimeAccountCheck(deepProbe, deps) {
                         account.refreshToken = cached.refreshToken;
                         state.storageChanged = true;
                     }
+                    if (cached.refreshToken &&
+                        clearAccountReauthRequired(account)) {
+                        state.storageChanged = true;
+                    }
                     if (cached.accessToken &&
                         cached.accessToken !== account.accessToken) {
                         account.accessToken = cached.accessToken;
@@ -93,6 +98,13 @@ export async function runRuntimeAccountCheck(deepProbe, deps) {
                 if (refreshResult.type !== "success") {
                     state.errors += 1;
                     const message = refreshResult.message ?? refreshResult.reason ?? "refresh failed";
+                    const reauthRequirement = classifyRefreshFailureForReauth(refreshResult, {
+                        sessionUsable: false,
+                    });
+                    if (reauthRequirement &&
+                        markAccountReauthRequired(account, reauthRequirement, nowMs)) {
+                        state.storageChanged = true;
+                    }
                     deps.showLine(`[${i + 1}/${total}] ${label}: ERROR (${message})`);
                     if (deepProbe && deps.isRuntimeFlaggableFailure(refreshResult)) {
                         const existingIndex = state.flaggedStorage.accounts.findIndex((flagged) => flagged.refreshToken === account.refreshToken);
@@ -127,6 +139,9 @@ export async function runRuntimeAccountCheck(deepProbe, deps) {
                 if (typeof refreshResult.expires === "number" &&
                     refreshResult.expires !== account.expiresAt) {
                     account.expiresAt = refreshResult.expires;
+                    state.storageChanged = true;
+                }
+                if (clearAccountReauthRequired(account)) {
                     state.storageChanged = true;
                 }
                 const hydratedEmail = deps.sanitizeEmail(deps.extractAccountEmail(refreshResult.access, refreshResult.idToken));

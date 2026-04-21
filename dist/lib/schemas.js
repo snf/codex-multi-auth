@@ -4,6 +4,7 @@
  * Types are inferred from schemas using z.infer.
  */
 import { z } from "zod";
+import { ACCOUNT_REAUTH_REASONS } from "./account-reauth.js";
 import { MODEL_FAMILIES } from "./prompts/codex.js";
 // ============================================================================
 // Plugin Configuration Schema
@@ -67,6 +68,10 @@ export const AccountIdSourceSchema = z.enum(["token", "id_token", "org", "manual
  */
 export const CooldownReasonSchema = z.enum(["auth-failure", "network-error", "rate-limit"]);
 /**
+ * Reason an account needs a fresh OAuth login.
+ */
+export const AccountReauthReasonSchema = z.enum(ACCOUNT_REAUTH_REASONS);
+/**
  * Last switch reason for account rotation tracking.
  */
 export const SwitchReasonSchema = z.enum([
@@ -98,6 +103,10 @@ export const AccountMetadataV3Schema = z.object({
     rateLimitResetTimes: RateLimitStateV3Schema.optional(),
     coolingDownUntil: z.number().optional(),
     cooldownReason: CooldownReasonSchema.optional(),
+    requiresReauth: z.boolean().optional(),
+    reauthReason: AccountReauthReasonSchema.optional(),
+    reauthMessage: z.string().optional(),
+    reauthDetectedAt: z.number().optional(),
 });
 /**
  * Build activeIndexByFamily schema dynamically from MODEL_FAMILIES.

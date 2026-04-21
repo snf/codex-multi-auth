@@ -2,6 +2,7 @@
  * Storage migration utilities for account data format upgrades.
  * Extracted from storage.ts to reduce module size.
  */
+import type { AccountReauthReason } from "../account-reauth.js";
 import { type ModelFamily } from "../prompts/codex.js";
 import type { AccountIdSource } from "../types.js";
 import type { Workspace } from "../accounts.js";
@@ -26,6 +27,10 @@ export interface AccountMetadataV1 {
     rateLimitResetTime?: number;
     coolingDownUntil?: number;
     cooldownReason?: CooldownReason;
+    requiresReauth?: boolean;
+    reauthReason?: AccountReauthReason;
+    reauthMessage?: string;
+    reauthDetectedAt?: number;
 }
 export interface AccountStorageV1 {
     version: 1;
@@ -49,6 +54,10 @@ export interface AccountMetadataV3 {
     rateLimitResetTimes?: RateLimitStateV3;
     coolingDownUntil?: number;
     cooldownReason?: CooldownReason;
+    requiresReauth?: boolean;
+    reauthReason?: AccountReauthReason;
+    reauthMessage?: string;
+    reauthDetectedAt?: number;
     workspaces?: Workspace[];
     currentWorkspaceIndex?: number;
 }

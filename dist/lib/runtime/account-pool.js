@@ -1,3 +1,4 @@
+import { clearAccountReauthRequired } from "../account-reauth.js";
 export async function persistAccountPoolResults(params) {
     const { results, replaceAll = false } = params;
     if (results.length === 0)
@@ -93,7 +94,7 @@ export async function persistAccountPoolResults(params) {
                         : 0;
                 })()
                 : existing.currentWorkspaceIndex;
-            accounts[existingIndex] = {
+            const updatedAccount = {
                 ...existing,
                 accountId: nextAccountId,
                 accountIdSource: nextAccountIdSource,
@@ -106,6 +107,8 @@ export async function persistAccountPoolResults(params) {
                 workspaces: mergedWorkspaces,
                 currentWorkspaceIndex: nextCurrentWorkspaceIndex,
             };
+            clearAccountReauthRequired(updatedAccount);
+            accounts[existingIndex] = updatedAccount;
         }
         if (accounts.length === 0)
             return;

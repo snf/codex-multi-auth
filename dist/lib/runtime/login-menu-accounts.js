@@ -4,6 +4,9 @@ export function buildLoginMenuAccounts(accounts, deps) {
         if (account.enabled === false) {
             status = "disabled";
         }
+        else if (account.requiresReauth === true) {
+            status = "reauth";
+        }
         else if (typeof account.coolingDownUntil === "number" &&
             account.coolingDownUntil > deps.now) {
             status = "cooldown";

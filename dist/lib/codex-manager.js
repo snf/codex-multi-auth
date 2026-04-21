@@ -30,6 +30,7 @@ import { isWorkspaceDisabledError } from "./request/fetch-helpers.js";
 import { loadQuotaCache, saveQuotaCache, } from "./quota-cache.js";
 import { fetchCodexQuotaSnapshot, formatQuotaSnapshotLine, } from "./quota-probe.js";
 import { queuedRefresh } from "./refresh-queue.js";
+import { classifyRefreshFailureForReauth, clearAccountReauthRequired, markAccountReauthRequired, } from "./account-reauth.js";
 import { clearAccounts, findMatchingAccountIndex, formatStorageErrorHint, getLastAccountsSaveTimestamp, getNamedBackups, getStoragePath, loadAccounts, loadFlaggedAccounts, restoreAccountsFromBackup, StorageError, saveAccounts, setStoragePath, withAccountStorageTransaction, } from "./storage.js";
 import { ANSI } from "./ui/ansi.js";
 import { confirm } from "./ui/confirm.js";
@@ -775,6 +776,8 @@ function hasLikelyInvalidRefreshToken(refreshToken) {
 function mapAccountStatus(account, index, activeIndex, now, issueKind) {
     if (account.enabled === false)
         return "disabled";
+    if (account.requiresReauth === true)
+        return "reauth";
     if (typeof account.coolingDownUntil === "number" &&
         account.coolingDownUntil > now) {
         return "cooldown";
@@ -816,6 +819,7 @@ function accountStatusSortBucket(status) {
         case "cooldown":
         case "rate-limited":
             return 2;
+        case "reauth":
         case "workspace-disabled":
         case "disabled":
         case "error":
@@ -826,14 +830,14 @@ function accountStatusSortBucket(status) {
     }
 }
 function compareReadyFirstAccounts(left, right) {
-    const left5h = readQuotaLeftPercent(left, "5h");
-    const right5h = readQuotaLeftPercent(right, "5h");
-    if (left5h !== right5h)
-        return right5h - left5h;
     const left7d = readQuotaLeftPercent(left, "7d");
     const right7d = readQuotaLeftPercent(right, "7d");
     if (left7d !== right7d)
         return right7d - left7d;
+    const left5h = readQuotaLeftPercent(left, "5h");
+    const right5h = readQuotaLeftPercent(right, "5h");
+    if (left5h !== right5h)
+        return right5h - left5h;
     const bucketDelta = accountStatusSortBucket(left.status) -
         accountStatusSortBucket(right.status);
     if (bucketDelta !== 0)
@@ -1598,6 +1602,10 @@ async function persistAccountPool(results, replaceAll) {
                 expiresAt: result.expires,
                 enabled: true,
                 lastUsed: now,
+                requiresReauth: undefined,
+                reauthReason: undefined,
+                reauthMessage: undefined,
+                reauthDetectedAt: undefined,
             };
             selectedAccountIndex = existingIndex;
         }
@@ -1719,6 +1727,12 @@ async function runHealthCheck(options = {}) {
             if (hasLikelyInvalidRefreshToken(account.refreshToken)) {
                 healthDetail += " (re-login suggested soon)";
             }
+            if (account.requiresReauth === true) {
+                healthDetail += account.reauthMessage
+                    ? ` (re-login required: ${account.reauthMessage})`
+                    : " (re-login required)";
+                warnings += 1;
+            }
             ok += 1;
             if (display.showPerAccountRows) {
                 console.log(`  ${stylePromptText("✓", "success")} ${labelText} ${stylePromptText("|", "muted")} ${styleAccountDetailText(healthDetail)}`);
@@ -1754,6 +1768,9 @@ async function runHealthCheck(options = {}) {
             }
             if (account.enabled === false) {
                 account.enabled = true;
+                changed = true;
+            }
+            if (clearAccountReauthRequired(account)) {
                 changed = true;
             }
             if (accountIdentityChanged && liveProbe && workingQuotaCache) {
@@ -1805,6 +1822,13 @@ async function runHealthCheck(options = {}) {
         }
         else {
             const detail = normalizeFailureDetail(result.message, result.reason);
+            const reauthRequirement = classifyRefreshFailureForReauth(result, {
+                sessionUsable: sessionLikelyValid,
+            });
+            if (reauthRequirement &&
+                markAccountReauthRequired(account, reauthRequirement, Date.now())) {
+                changed = true;
+            }
             if (sessionLikelyValid) {
                 warnings += 1;
                 if (display.showPerAccountRows) {

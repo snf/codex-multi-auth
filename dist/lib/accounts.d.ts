@@ -1,5 +1,6 @@
 import type { Auth } from "@codex-ai/sdk";
 import { type AccountStorageV3, type CooldownReason, type RateLimitStateV3 } from "./storage.js";
+import type { AccountReauthReason } from "./account-reauth.js";
 import type { AccountIdSource, OAuthAuthDetails } from "./types.js";
 import { type ModelFamily } from "./prompts/codex.js";
 import { type HybridSelectionOptions } from "./rotation.js";
@@ -31,6 +32,10 @@ export interface ManagedAccount {
     rateLimitResetTimes: RateLimitStateV3;
     coolingDownUntil?: number;
     cooldownReason?: CooldownReason;
+    requiresReauth?: boolean;
+    reauthReason?: AccountReauthReason;
+    reauthMessage?: string;
+    reauthDetectedAt?: number;
     consecutiveAuthFailures?: number;
     workspaces?: Workspace[];
     currentWorkspaceIndex?: number;

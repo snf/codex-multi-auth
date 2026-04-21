@@ -86,6 +86,15 @@ export declare const CooldownReasonSchema: z.ZodEnum<{
 }>;
 export type CooldownReasonFromSchema = z.infer<typeof CooldownReasonSchema>;
 /**
+ * Reason an account needs a fresh OAuth login.
+ */
+export declare const AccountReauthReasonSchema: z.ZodEnum<{
+    "refresh-token-reused": "refresh-token-reused";
+    "refresh-token-invalid": "refresh-token-invalid";
+    "refresh-failed": "refresh-failed";
+}>;
+export type AccountReauthReasonFromSchema = z.infer<typeof AccountReauthReasonSchema>;
+/**
  * Last switch reason for account rotation tracking.
  */
 export declare const SwitchReasonSchema: z.ZodEnum<{
@@ -134,6 +143,14 @@ export declare const AccountMetadataV3Schema: z.ZodObject<{
         "network-error": "network-error";
         "rate-limit": "rate-limit";
     }>>;
+    requiresReauth: z.ZodOptional<z.ZodBoolean>;
+    reauthReason: z.ZodOptional<z.ZodEnum<{
+        "refresh-token-reused": "refresh-token-reused";
+        "refresh-token-invalid": "refresh-token-invalid";
+        "refresh-failed": "refresh-failed";
+    }>>;
+    reauthMessage: z.ZodOptional<z.ZodString>;
+    reauthDetectedAt: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export type AccountMetadataV3FromSchema = z.infer<typeof AccountMetadataV3Schema>;
 export declare const ActiveIndexByFamilySchema: z.ZodObject<{
@@ -179,6 +196,14 @@ export declare const AccountStorageV3Schema: z.ZodObject<{
             "network-error": "network-error";
             "rate-limit": "rate-limit";
         }>>;
+        requiresReauth: z.ZodOptional<z.ZodBoolean>;
+        reauthReason: z.ZodOptional<z.ZodEnum<{
+            "refresh-token-reused": "refresh-token-reused";
+            "refresh-token-invalid": "refresh-token-invalid";
+            "refresh-failed": "refresh-failed";
+        }>>;
+        reauthMessage: z.ZodOptional<z.ZodString>;
+        reauthDetectedAt: z.ZodOptional<z.ZodNumber>;
     }, z.core.$strip>>;
     activeIndex: z.ZodNumber;
     activeIndexByFamily: z.ZodOptional<z.ZodObject<{
@@ -333,6 +358,14 @@ export declare const AnyAccountStorageSchema: z.ZodDiscriminatedUnion<[z.ZodObje
             "network-error": "network-error";
             "rate-limit": "rate-limit";
         }>>;
+        requiresReauth: z.ZodOptional<z.ZodBoolean>;
+        reauthReason: z.ZodOptional<z.ZodEnum<{
+            "refresh-token-reused": "refresh-token-reused";
+            "refresh-token-invalid": "refresh-token-invalid";
+            "refresh-failed": "refresh-failed";
+        }>>;
+        reauthMessage: z.ZodOptional<z.ZodString>;
+        reauthDetectedAt: z.ZodOptional<z.ZodNumber>;
     }, z.core.$strip>>;
     activeIndex: z.ZodNumber;
     activeIndexByFamily: z.ZodOptional<z.ZodObject<{
@@ -348,11 +381,11 @@ export type AnyAccountStorageFromSchema = z.infer<typeof AnyAccountStorageSchema
  * Token failure reason codes.
  */
 export declare const TokenFailureReasonSchema: z.ZodEnum<{
+    missing_refresh: "missing_refresh";
+    network_error: "network_error";
     unknown: "unknown";
     http_error: "http_error";
     invalid_response: "invalid_response";
-    network_error: "network_error";
-    missing_refresh: "missing_refresh";
 }>;
 export type TokenFailureReasonFromSchema = z.infer<typeof TokenFailureReasonSchema>;
 /**
@@ -373,11 +406,11 @@ export type TokenSuccessFromSchema = z.infer<typeof TokenSuccessSchema>;
 export declare const TokenFailureSchema: z.ZodObject<{
     type: z.ZodLiteral<"failed">;
     reason: z.ZodOptional<z.ZodEnum<{
+        missing_refresh: "missing_refresh";
+        network_error: "network_error";
         unknown: "unknown";
         http_error: "http_error";
         invalid_response: "invalid_response";
-        network_error: "network_error";
-        missing_refresh: "missing_refresh";
     }>>;
     statusCode: z.ZodOptional<z.ZodNumber>;
     message: z.ZodOptional<z.ZodString>;
@@ -396,11 +429,11 @@ export declare const TokenResultSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"failed">;
     reason: z.ZodOptional<z.ZodEnum<{
+        missing_refresh: "missing_refresh";
+        network_error: "network_error";
         unknown: "unknown";
         http_error: "http_error";
         invalid_response: "invalid_response";
-        network_error: "network_error";
-        missing_refresh: "missing_refresh";
     }>>;
     statusCode: z.ZodOptional<z.ZodNumber>;
     message: z.ZodOptional<z.ZodString>;

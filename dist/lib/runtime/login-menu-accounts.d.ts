@@ -1,3 +1,4 @@
+import type { AccountStatus } from "../ui/auth-menu.js";
 type LoginMenuAccount = {
     accountId?: string;
     accountLabel?: string;
@@ -5,7 +6,7 @@ type LoginMenuAccount = {
     index: number;
     addedAt?: number;
     lastUsed?: number;
-    status: "active" | "ok" | "rate-limited" | "cooldown" | "disabled";
+    status: AccountStatus;
     isCurrentAccount: boolean;
     enabled: boolean;
 };
@@ -16,6 +17,7 @@ export declare function buildLoginMenuAccounts(accounts: Array<{
     addedAt?: number;
     lastUsed?: number;
     enabled?: boolean;
+    requiresReauth?: boolean;
     coolingDownUntil?: number;
     rateLimitResetTimes?: Record<string, number | undefined>;
 }>, deps: {

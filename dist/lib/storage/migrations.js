@@ -32,6 +32,10 @@ export function migrateV1ToV3(v1) {
                 rateLimitResetTimes: Object.keys(rateLimitResetTimes).length > 0 ? rateLimitResetTimes : undefined,
                 coolingDownUntil: account.coolingDownUntil,
                 cooldownReason: account.cooldownReason,
+                requiresReauth: account.requiresReauth,
+                reauthReason: account.reauthReason,
+                reauthMessage: account.reauthMessage,
+                reauthDetectedAt: account.reauthDetectedAt,
             };
         }),
         activeIndex: v1.activeIndex,
