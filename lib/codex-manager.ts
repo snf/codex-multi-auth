@@ -92,6 +92,11 @@ import {
 } from "./quota-probe.js";
 import { queuedRefresh } from "./refresh-queue.js";
 import {
+	classifyRefreshFailureForReauth,
+	clearAccountReauthRequired,
+	markAccountReauthRequired,
+} from "./account-reauth.js";
+import {
 	type AccountMetadataV3,
 	type AccountStorageV3,
 	clearAccounts,
@@ -1097,6 +1102,7 @@ function mapAccountStatus(
 	issueKind?: QuotaCacheEntry["issueKind"],
 ): ExistingAccountInfo["status"] {
 	if (account.enabled === false) return "disabled";
+	if (account.requiresReauth === true) return "reauth";
 	if (
 		typeof account.coolingDownUntil === "number" &&
 		account.coolingDownUntil > now
@@ -1149,6 +1155,7 @@ function accountStatusSortBucket(
 		case "cooldown":
 		case "rate-limited":
 			return 2;
+		case "reauth":
 		case "workspace-disabled":
 		case "disabled":
 		case "error":
@@ -1163,13 +1170,13 @@ function compareReadyFirstAccounts(
 	left: ExistingAccountInfo,
 	right: ExistingAccountInfo,
 ): number {
-	const left5h = readQuotaLeftPercent(left, "5h");
-	const right5h = readQuotaLeftPercent(right, "5h");
-	if (left5h !== right5h) return right5h - left5h;
-
 	const left7d = readQuotaLeftPercent(left, "7d");
 	const right7d = readQuotaLeftPercent(right, "7d");
 	if (left7d !== right7d) return right7d - left7d;
+
+	const left5h = readQuotaLeftPercent(left, "5h");
+	const right5h = readQuotaLeftPercent(right, "5h");
+	if (left5h !== right5h) return right5h - left5h;
 
 	const bucketDelta =
 		accountStatusSortBucket(left.status) -
@@ -2095,6 +2102,10 @@ async function persistAccountPool(
 				expiresAt: result.expires,
 				enabled: true,
 				lastUsed: now,
+				requiresReauth: undefined,
+				reauthReason: undefined,
+				reauthMessage: undefined,
+				reauthDetectedAt: undefined,
 			};
 			selectedAccountIndex = existingIndex;
 		}
@@ -2262,6 +2273,12 @@ async function runHealthCheck(options: HealthCheckOptions = {}): Promise<void> {
 			if (hasLikelyInvalidRefreshToken(account.refreshToken)) {
 				healthDetail += " (re-login suggested soon)";
 			}
+			if (account.requiresReauth === true) {
+				healthDetail += account.reauthMessage
+					? ` (re-login required: ${account.reauthMessage})`
+					: " (re-login required)";
+				warnings += 1;
+			}
 			ok += 1;
 			if (display.showPerAccountRows) {
 				console.log(
@@ -2301,6 +2318,9 @@ async function runHealthCheck(options: HealthCheckOptions = {}): Promise<void> {
 			}
 			if (account.enabled === false) {
 				account.enabled = true;
+				changed = true;
+			}
+			if (clearAccountReauthRequired(account)) {
 				changed = true;
 			}
 			if (accountIdentityChanged && liveProbe && workingQuotaCache) {
@@ -2374,6 +2394,15 @@ async function runHealthCheck(options: HealthCheckOptions = {}): Promise<void> {
 			}
 		} else {
 			const detail = normalizeFailureDetail(result.message, result.reason);
+			const reauthRequirement = classifyRefreshFailureForReauth(result, {
+				sessionUsable: sessionLikelyValid,
+			});
+			if (
+				reauthRequirement &&
+				markAccountReauthRequired(account, reauthRequirement, Date.now())
+			) {
+				changed = true;
+			}
 			if (sessionLikelyValid) {
 				warnings += 1;
 				if (display.showPerAccountRows) {

@@ -1,4 +1,5 @@
 import type { Workspace } from "../accounts.js";
+import { clearAccountReauthRequired } from "../account-reauth.js";
 import type { ModelFamily } from "../prompts/codex.js";
 import type { AccountMetadataV3, AccountStorageV3 } from "../storage.js";
 import type { AccountIdSource, TokenResult } from "../types.js";
@@ -152,7 +153,7 @@ export async function persistAccountPoolResults(params: {
 								: 0;
 						})()
 					: existing.currentWorkspaceIndex;
-			accounts[existingIndex] = {
+			const updatedAccount = {
 				...existing,
 				accountId: nextAccountId,
 				accountIdSource: nextAccountIdSource,
@@ -165,6 +166,8 @@ export async function persistAccountPoolResults(params: {
 				workspaces: mergedWorkspaces,
 				currentWorkspaceIndex: nextCurrentWorkspaceIndex,
 			};
+			clearAccountReauthRequired(updatedAccount);
+			accounts[existingIndex] = updatedAccount;
 		}
 
 		if (accounts.length === 0) return;

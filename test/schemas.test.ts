@@ -169,6 +169,10 @@ describe("AccountMetadataV3Schema", () => {
 			rateLimitResetTimes: { "gpt-5.2-codex": Date.now() + 60000 },
 			coolingDownUntil: Date.now() + 30000,
 			cooldownReason: "auth-failure" as const,
+			requiresReauth: true,
+			reauthReason: "refresh-token-reused" as const,
+			reauthMessage: "Refresh token was already used",
+			reauthDetectedAt: Date.now(),
 		};
 		const result = AccountMetadataV3Schema.safeParse(fullAccount);
 		expect(result.success).toBe(true);

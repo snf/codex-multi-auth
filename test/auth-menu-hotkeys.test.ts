@@ -197,4 +197,17 @@ describe("auth-menu hotkeys", () => {
 		const options = selectMock.mock.calls[0]?.[1] as { message?: string };
 		expect(options?.message).toBe("Accounts Dashboard (v0.1.6)");
 	});
+
+	it("renders reauth accounts with a re-login badge", async () => {
+		selectMock.mockResolvedValueOnce({ type: "cancel" });
+
+		const { showAuthMenu } = await import("../lib/ui/auth-menu.js");
+		await showAuthMenu([
+			{ index: 0, email: "renew@example.com", status: "reauth" },
+		]);
+
+		const items = selectMock.mock.calls[0]?.[0] as Array<{ label?: string; hint?: string }>;
+		const accountItem = items.find((item) => item.label?.includes("renew@example.com"));
+		expect(accountItem?.label).toContain("re-login");
+	});
 });

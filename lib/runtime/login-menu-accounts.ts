@@ -1,3 +1,5 @@
+import type { AccountStatus } from "../ui/auth-menu.js";
+
 type LoginMenuAccount = {
 	accountId?: string;
 	accountLabel?: string;
@@ -5,7 +7,7 @@ type LoginMenuAccount = {
 	index: number;
 	addedAt?: number;
 	lastUsed?: number;
-	status: "active" | "ok" | "rate-limited" | "cooldown" | "disabled";
+	status: AccountStatus;
 	isCurrentAccount: boolean;
 	enabled: boolean;
 };
@@ -18,6 +20,7 @@ export function buildLoginMenuAccounts(
 		addedAt?: number;
 		lastUsed?: number;
 		enabled?: boolean;
+		requiresReauth?: boolean;
 		coolingDownUntil?: number;
 		rateLimitResetTimes?: Record<string, number | undefined>;
 	}>,
@@ -36,6 +39,8 @@ export function buildLoginMenuAccounts(
 		let status: LoginMenuAccount["status"];
 		if (account.enabled === false) {
 			status = "disabled";
+		} else if (account.requiresReauth === true) {
+			status = "reauth";
 		} else if (
 			typeof account.coolingDownUntil === "number" &&
 			account.coolingDownUntil > deps.now

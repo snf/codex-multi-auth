@@ -6181,6 +6181,77 @@ describe("codex manager cli commands", () => {
 		expect(queuedRefreshMock).not.toHaveBeenCalled();
 	});
 
+	it("tags refresh-token reuse failures for re-login on the next login menu render", async () => {
+		const now = Date.now();
+		const storage = {
+			version: 3,
+			activeIndex: 0,
+			activeIndexByFamily: { codex: 0 },
+			accounts: [
+				{
+					email: "reuse@example.com",
+					accountId: "acc_reuse",
+					refreshToken: "refresh-reused",
+					accessToken: "access-expired",
+					expiresAt: now - 60_000,
+					addedAt: now - 1_000,
+					lastUsed: now - 1_000,
+					enabled: true,
+				},
+			],
+		};
+		loadAccountsMock.mockResolvedValue(storage);
+		loadDashboardDisplaySettingsMock.mockResolvedValue({
+			showPerAccountRows: true,
+			showQuotaDetails: true,
+			showForecastReasons: true,
+			showRecommendations: true,
+			showLiveProbeNotes: true,
+			menuAutoFetchLimits: false,
+			menuSortEnabled: true,
+			menuSortMode: "ready-first",
+			menuSortPinCurrent: true,
+			menuSortQuickSwitchVisibleRow: true,
+		});
+		promptLoginModeMock
+			.mockResolvedValueOnce({ mode: "check" })
+			.mockResolvedValueOnce({ mode: "cancel" });
+		queuedRefreshMock.mockResolvedValueOnce({
+			type: "failed",
+			reason: "http_error",
+			statusCode: 400,
+			message:
+				'{"error":{"message":"Your refresh token has already been used to generate a new access token. Please try signing in again.","code":"refresh_token_reused"}}',
+		});
+
+		const { runCodexMultiAuthCli } = await import("../lib/codex-manager.js");
+		const exitCode = await runCodexMultiAuthCli(["auth", "login"]);
+
+		expect(exitCode).toBe(0);
+		expect(saveAccountsMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				accounts: [
+					expect.objectContaining({
+						email: "reuse@example.com",
+						requiresReauth: true,
+						reauthReason: "refresh-token-reused",
+						reauthMessage: expect.stringContaining("already been used"),
+					}),
+				],
+			}),
+		);
+		const secondCallAccounts = promptLoginModeMock.mock.calls[1]?.[0] as Array<{
+			email?: string;
+			status?: string;
+		}>;
+		expect(secondCallAccounts[0]).toEqual(
+			expect.objectContaining({
+				email: "reuse@example.com",
+				status: "reauth",
+			}),
+		);
+	});
+
 	it("runs verify-flagged from the login menu", async () => {
 		const now = Date.now();
 		loadAccountsMock.mockResolvedValue({

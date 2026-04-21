@@ -1,4 +1,9 @@
 import { maskEmail } from "../logger.js";
+import {
+	classifyRefreshFailureForReauth,
+	clearAccountReauthRequired,
+	markAccountReauthRequired,
+} from "../account-reauth.js";
 import type { ModelFamily } from "../prompts/codex.js";
 import type { AccountStorageV3, FlaggedAccountMetadataV1 } from "../storage.js";
 import type { AccountIdSource, TokenResult } from "../types.js";
@@ -154,6 +159,12 @@ export async function runRuntimeAccountCheck(
 						state.storageChanged = true;
 					}
 					if (
+						cached.refreshToken &&
+						clearAccountReauthRequired(account)
+					) {
+						state.storageChanged = true;
+					}
+					if (
 						cached.accessToken &&
 						cached.accessToken !== account.accessToken
 					) {
@@ -195,6 +206,16 @@ export async function runRuntimeAccountCheck(
 					state.errors += 1;
 					const message =
 						refreshResult.message ?? refreshResult.reason ?? "refresh failed";
+					const reauthRequirement =
+						classifyRefreshFailureForReauth(refreshResult, {
+							sessionUsable: false,
+						});
+					if (
+						reauthRequirement &&
+						markAccountReauthRequired(account, reauthRequirement, nowMs)
+					) {
+						state.storageChanged = true;
+					}
 					deps.showLine(`[${i + 1}/${total}] ${label}: ERROR (${message})`);
 					if (deepProbe && deps.isRuntimeFlaggableFailure(refreshResult)) {
 						const existingIndex = state.flaggedStorage.accounts.findIndex(
@@ -235,6 +256,9 @@ export async function runRuntimeAccountCheck(
 					refreshResult.expires !== account.expiresAt
 				) {
 					account.expiresAt = refreshResult.expires;
+					state.storageChanged = true;
+				}
+				if (clearAccountReauthRequired(account)) {
 					state.storageChanged = true;
 				}
 				const hydratedEmail = deps.sanitizeEmail(

@@ -8,6 +8,7 @@ import {
 	type RateLimitStateV3,
 	findMatchingAccountIndex,
 } from "./storage.js";
+import type { AccountReauthReason } from "./account-reauth.js";
 import type { AccountIdSource, OAuthAuthDetails } from "./types.js";
 import { MODEL_FAMILIES, type ModelFamily } from "./prompts/codex.js";
 import {
@@ -111,6 +112,10 @@ export interface ManagedAccount {
 	rateLimitResetTimes: RateLimitStateV3;
 	coolingDownUntil?: number;
 	cooldownReason?: CooldownReason;
+	requiresReauth?: boolean;
+	reauthReason?: AccountReauthReason;
+	reauthMessage?: string;
+	reauthDetectedAt?: number;
 	consecutiveAuthFailures?: number;
 	workspaces?: Workspace[];
 	currentWorkspaceIndex?: number;
@@ -285,6 +290,10 @@ export class AccountManager {
 						rateLimitResetTimes: account.rateLimitResetTimes ?? {},
 						coolingDownUntil: account.coolingDownUntil,
 						cooldownReason: account.cooldownReason,
+						requiresReauth: account.requiresReauth,
+						reauthReason: account.reauthReason,
+						reauthMessage: account.reauthMessage,
+						reauthDetectedAt: account.reauthDetectedAt,
 						workspaces: account.workspaces,
 						currentWorkspaceIndex: account.currentWorkspaceIndex,
 					};
@@ -806,6 +815,10 @@ export class AccountManager {
 					Object.keys(account.rateLimitResetTimes).length > 0 ? account.rateLimitResetTimes : undefined,
 				coolingDownUntil: account.coolingDownUntil,
 				cooldownReason: account.cooldownReason,
+				requiresReauth: account.requiresReauth,
+				reauthReason: account.reauthReason,
+				reauthMessage: account.reauthMessage,
+				reauthDetectedAt: account.reauthDetectedAt,
 				workspaces: account.workspaces,
 				currentWorkspaceIndex: account.currentWorkspaceIndex,
 			})),

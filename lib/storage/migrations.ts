@@ -3,6 +3,7 @@
  * Extracted from storage.ts to reduce module size.
  */
 
+import type { AccountReauthReason } from "../account-reauth.js";
 import { MODEL_FAMILIES, type ModelFamily } from "../prompts/codex.js";
 import type { AccountIdSource } from "../types.js";
 import type { Workspace } from "../accounts.js";
@@ -35,6 +36,10 @@ export interface AccountMetadataV1 {
 	rateLimitResetTime?: number;
 	coolingDownUntil?: number;
 	cooldownReason?: CooldownReason;
+	requiresReauth?: boolean;
+	reauthReason?: AccountReauthReason;
+	reauthMessage?: string;
+	reauthDetectedAt?: number;
 }
 
 export interface AccountStorageV1 {
@@ -65,6 +70,10 @@ export interface AccountMetadataV3 {
 	rateLimitResetTimes?: RateLimitStateV3;
 	coolingDownUntil?: number;
 	cooldownReason?: CooldownReason;
+	requiresReauth?: boolean;
+	reauthReason?: AccountReauthReason;
+	reauthMessage?: string;
+	reauthDetectedAt?: number;
 	workspaces?: Workspace[];
 	currentWorkspaceIndex?: number;
 }
@@ -106,6 +115,10 @@ export function migrateV1ToV3(v1: AccountStorageV1): AccountStorageV3 {
 				rateLimitResetTimes: Object.keys(rateLimitResetTimes).length > 0 ? rateLimitResetTimes : undefined,
 				coolingDownUntil: account.coolingDownUntil,
 				cooldownReason: account.cooldownReason,
+				requiresReauth: account.requiresReauth,
+				reauthReason: account.reauthReason,
+				reauthMessage: account.reauthMessage,
+				reauthDetectedAt: account.reauthDetectedAt,
 			};
 		}),
 		activeIndex: v1.activeIndex,

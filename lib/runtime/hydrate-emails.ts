@@ -1,3 +1,4 @@
+import { clearAccountReauthRequired } from "../account-reauth.js";
 import type { AccountStorageV3 } from "../storage.js";
 import type { AccountIdSource, TokenResult } from "../types.js";
 
@@ -74,6 +75,9 @@ export async function hydrateRuntimeEmails(
 				}
 				if (refreshed.refresh && refreshed.refresh !== account.refreshToken) {
 					account.refreshToken = refreshed.refresh;
+					changed = true;
+				}
+				if (clearAccountReauthRequired(account)) {
 					changed = true;
 				}
 			} catch {

@@ -12,6 +12,7 @@ export type AccountStatus =
 	| "ok"
 	| "rate-limited"
 	| "cooldown"
+	| "reauth"
 	| "workspace-disabled"
 	| "disabled"
 	| "error"
@@ -130,6 +131,8 @@ function statusBadge(status: AccountStatus | undefined): string {
 				return withTone("rate-limited", "warning");
 			case "cooldown":
 				return withTone("cooldown", "warning");
+			case "reauth":
+				return withTone("re-login", "danger");
 			case "workspace-disabled":
 				return withTone("workspace disabled", "danger");
 			case "flagged":
@@ -152,6 +155,8 @@ function statusBadge(status: AccountStatus | undefined): string {
 			return withTone("rate-limited", "warning");
 		case "cooldown":
 			return withTone("cooldown", "warning");
+		case "reauth":
+			return withTone("re-login", "danger");
 		case "workspace-disabled":
 			return withTone("workspace disabled", "danger");
 		case "flagged":
@@ -196,6 +201,7 @@ function accountRowColor(account: AccountInfo): MenuItem<AuthMenuAction>["color"
 		case "rate-limited":
 		case "cooldown":
 			return "yellow";
+		case "reauth":
 		case "workspace-disabled":
 		case "disabled":
 		case "error":
@@ -214,6 +220,8 @@ function statusTone(status: AccountStatus | undefined): "success" | "warning" | 
 		case "rate-limited":
 		case "cooldown":
 			return "warning";
+		case "reauth":
+			return "danger";
 		case "workspace-disabled":
 		case "disabled":
 		case "error":
@@ -227,6 +235,9 @@ function statusTone(status: AccountStatus | undefined): "success" | "warning" | 
 function statusText(status: AccountStatus | undefined): string {
 	if (status === "workspace-disabled") {
 		return "workspace disabled";
+	}
+	if (status === "reauth") {
+		return "re-login required";
 	}
 	return status ?? "unknown";
 }
@@ -637,7 +648,7 @@ export async function showAccountDetails(account: AccountInfo): Promise<AccountA
 				? ` ${formatUiBadge(ui, "disabled", "danger")}`
 				: ` ${ANSI.red}[disabled]${ANSI.reset}`)
 			: "");
-	const statusLabel = account.status ?? "unknown";
+	const statusLabel = statusText(account.status);
 	const subtitle = `Added: ${formatDate(account.addedAt)} | Used: ${formatRelativeTime(account.lastUsed)} | Status: ${statusLabel}`;
 	let focusAction: AccountAction = "back";
 

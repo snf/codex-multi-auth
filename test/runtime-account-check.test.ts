@@ -147,6 +147,62 @@ describe("runRuntimeAccountCheck", () => {
 		expect(saved.accounts[0]?.refreshToken).toBe("rotated-refresh");
 	});
 
+	it("persists a re-login marker when quick check sees refresh-token reuse", async () => {
+		const saveAccounts = vi.fn(async () => {});
+
+		await runRuntimeAccountCheck(false, {
+			hydrateEmails: async (storage) => storage,
+			loadAccounts: async () => ({
+				version: 3,
+				accounts: [
+					{
+						email: "reuse@example.com",
+						refreshToken: "refresh-reused",
+						accessToken: undefined,
+						addedAt: 1,
+						lastUsed: 1,
+					},
+				],
+				activeIndex: 0,
+				activeIndexByFamily: { codex: 0 },
+			}),
+			createEmptyStorage: () => ({ version: 3, accounts: [], activeIndex: 0, activeIndexByFamily: {} }),
+			loadFlaggedAccounts: async () => ({ version: 1, accounts: [] }),
+			createAccountCheckWorkingState: (flaggedStorage) => ({ flaggedStorage, removeFromActive: new Set(), storageChanged: false, flaggedChanged: false, ok: 0, errors: 0, disabled: 0 }),
+			lookupCodexCliTokensByEmail: async () => null,
+			extractAccountId: () => undefined,
+			shouldUpdateAccountIdFromToken: () => false,
+			sanitizeEmail: (email) => email,
+			extractAccountEmail: () => undefined,
+			queuedRefresh: async () => ({
+				type: "failed",
+				reason: "http_error",
+				statusCode: 400,
+				message:
+					'{"error":{"message":"Your refresh token has already been used to generate a new access token.","code":"refresh_token_reused"}}',
+			}),
+			isRuntimeFlaggableFailure: () => false,
+			fetchCodexQuotaSnapshot: async () => ({ remaining5h: 1, remaining7d: 2 } as never),
+			resolveRequestAccountId: () => "acct",
+			formatCodexQuotaLine: () => "quota ok",
+			clampRuntimeActiveIndices: vi.fn(),
+			MODEL_FAMILIES: ["codex"],
+			saveAccounts,
+			invalidateAccountManagerCache: vi.fn(),
+			saveFlaggedAccounts: vi.fn(async () => {}),
+			now: () => 10_000,
+			showLine: vi.fn(),
+		});
+
+		const saved = saveAccounts.mock.calls[0]?.[0];
+		expect(saved.accounts[0]).toMatchObject({
+			email: "reuse@example.com",
+			requiresReauth: true,
+			reauthReason: "refresh-token-reused",
+			reauthDetectedAt: 10_000,
+		});
+	});
+
 	it("hydrates account state from a valid CLI cache entry without refreshing", async () => {
 		const queuedRefresh = vi.fn(async () => ({ type: "failed" as const, reason: "invalid_grant" }));
 		const fetchCodexQuotaSnapshot = vi.fn(

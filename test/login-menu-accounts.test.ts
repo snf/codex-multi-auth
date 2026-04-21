@@ -67,4 +67,30 @@ describe("buildLoginMenuAccounts", () => {
 			}),
 		]);
 	});
+
+	it("marks accounts that require re-login before temporary limit states", () => {
+		const result = buildLoginMenuAccounts(
+			[
+				{
+					email: "renew@example.com",
+					enabled: true,
+					requiresReauth: true,
+					coolingDownUntil: 2_000,
+					rateLimitResetTimes: { codex: 2_000 },
+				},
+			],
+			{
+				now: 1_000,
+				activeIndex: 0,
+				formatRateLimitEntry: () => "resets in 1m",
+			},
+		);
+
+		expect(result[0]).toEqual(
+			expect.objectContaining({
+				email: "renew@example.com",
+				status: "reauth",
+			}),
+		);
+	});
 });

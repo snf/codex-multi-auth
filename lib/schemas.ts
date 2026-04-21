@@ -4,6 +4,7 @@
  * Types are inferred from schemas using z.infer.
  */
 import { z } from "zod";
+import { ACCOUNT_REAUTH_REASONS } from "./account-reauth.js";
 import { MODEL_FAMILIES, type ModelFamily } from "./prompts/codex.js";
 
 // ============================================================================
@@ -82,6 +83,13 @@ export const CooldownReasonSchema = z.enum(["auth-failure", "network-error", "ra
 export type CooldownReasonFromSchema = z.infer<typeof CooldownReasonSchema>;
 
 /**
+ * Reason an account needs a fresh OAuth login.
+ */
+export const AccountReauthReasonSchema = z.enum(ACCOUNT_REAUTH_REASONS);
+
+export type AccountReauthReasonFromSchema = z.infer<typeof AccountReauthReasonSchema>;
+
+/**
  * Last switch reason for account rotation tracking.
  */
 export const SwitchReasonSchema = z.enum([
@@ -119,6 +127,10 @@ export const AccountMetadataV3Schema = z.object({
 	rateLimitResetTimes: RateLimitStateV3Schema.optional(),
 	coolingDownUntil: z.number().optional(),
 	cooldownReason: CooldownReasonSchema.optional(),
+	requiresReauth: z.boolean().optional(),
+	reauthReason: AccountReauthReasonSchema.optional(),
+	reauthMessage: z.string().optional(),
+	reauthDetectedAt: z.number().optional(),
 });
 
 export type AccountMetadataV3FromSchema = z.infer<typeof AccountMetadataV3Schema>;
