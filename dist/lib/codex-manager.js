@@ -30,7 +30,7 @@ import { isWorkspaceDisabledError } from "./request/fetch-helpers.js";
 import { loadQuotaCache, saveQuotaCache, } from "./quota-cache.js";
 import { fetchCodexQuotaSnapshot, formatQuotaSnapshotLine, } from "./quota-probe.js";
 import { queuedRefresh } from "./refresh-queue.js";
-import { classifyRefreshFailureForReauth, clearAccountReauthRequired, markAccountReauthRequired, } from "./account-reauth.js";
+import { classifyAccessTokenFailureForReauth, classifyRefreshFailureForReauth, clearAccountReauthRequired, markAccountReauthRequired, } from "./account-reauth.js";
 import { clearAccounts, findMatchingAccountIndex, formatStorageErrorHint, getLastAccountsSaveTimestamp, getNamedBackups, getStoragePath, loadAccounts, loadFlaggedAccounts, restoreAccountsFromBackup, StorageError, saveAccounts, setStoragePath, withAccountStorageTransaction, } from "./storage.js";
 import { ANSI } from "./ui/ansi.js";
 import { confirm } from "./ui/confirm.js";
@@ -217,6 +217,18 @@ function classifyLiveProbeIssue(error) {
         code,
         message: formatWorkspaceIssueMessage(code),
     };
+}
+function markLiveProbeReauthIfNeeded(account, error, now = Date.now()) {
+    const message = normalizeFailureDetail(error instanceof Error ? error.message : String(error), undefined);
+    const requirement = classifyAccessTokenFailureForReauth({ message });
+    return requirement
+        ? markAccountReauthRequired(account, requirement, now)
+        : false;
+}
+function clearAccessTokenReauthAfterLiveProbeSuccess(account) {
+    return account.reauthReason === "access-token-invalidated"
+        ? clearAccountReauthRequired(account)
+        : false;
 }
 function joinStyledSegments(parts) {
     if (parts.length === 0)
@@ -728,7 +740,8 @@ async function refreshQuotaCacheForMenu(storage, cache, maxAgeMs, onProgress) {
     const total = targets.length;
     let processed = 0;
     onProgress?.(processed, total);
-    let changed = false;
+    let quotaCacheChanged = false;
+    let storageChanged = false;
     for (const target of targets) {
         processed += 1;
         onProgress?.(processed, total);
@@ -738,21 +751,30 @@ async function refreshQuotaCacheForMenu(storage, cache, maxAgeMs, onProgress) {
                 accessToken: target.accessToken,
                 model: MENU_QUOTA_REFRESH_MODEL,
             });
-            changed =
-                updateQuotaCacheForAccount(nextCache, target.account, snapshot, storage.accounts, emailFallbackState) || changed;
+            quotaCacheChanged =
+                updateQuotaCacheForAccount(nextCache, target.account, snapshot, storage.accounts, emailFallbackState) || quotaCacheChanged;
+            if (clearAccessTokenReauthAfterLiveProbeSuccess(target.account)) {
+                storageChanged = true;
+            }
         }
         catch (error) {
+            if (markLiveProbeReauthIfNeeded(target.account, error, now)) {
+                storageChanged = true;
+            }
             const issue = classifyLiveProbeIssue(error);
             if (!issue) {
                 // Keep existing cached values if probing fails.
                 continue;
             }
-            changed =
-                updateQuotaCacheIssueForAccount(nextCache, target.account, issue, storage.accounts, MENU_QUOTA_REFRESH_MODEL, emailFallbackState) || changed;
+            quotaCacheChanged =
+                updateQuotaCacheIssueForAccount(nextCache, target.account, issue, storage.accounts, MENU_QUOTA_REFRESH_MODEL, emailFallbackState) || quotaCacheChanged;
         }
     }
-    if (changed) {
+    if (quotaCacheChanged) {
         await saveQuotaCache(nextCache);
+    }
+    if (storageChanged) {
+        await saveAccounts(storage);
     }
     return nextCache;
 }
@@ -1689,6 +1711,7 @@ async function runHealthCheck(options = {}) {
                 activeAccountRefreshed = true;
             }
             let healthDetail = "signed in and working";
+            let reauthDetectedByLiveProbe = false;
             if (liveProbe) {
                 const currentAccessToken = account.accessToken;
                 const probeAccountId = currentAccessToken
@@ -1711,15 +1734,27 @@ async function runHealthCheck(options = {}) {
                                 updateQuotaCacheForAccount(workingQuotaCache, account, snapshot, storage.accounts, quotaEmailFallbackState ?? undefined) || quotaCacheChanged;
                         }
                         healthDetail = formatQuotaSnapshotForDashboard(snapshot, display);
+                        if (clearAccessTokenReauthAfterLiveProbeSuccess(account)) {
+                            changed = true;
+                        }
                     }
                     catch (error) {
+                        reauthDetectedByLiveProbe =
+                            classifyAccessTokenFailureForReauth({
+                                message: error instanceof Error ? error.message : String(error),
+                            }) !== null;
+                        if (reauthDetectedByLiveProbe &&
+                            markLiveProbeReauthIfNeeded(account, error)) {
+                            changed = true;
+                        }
                         const issue = classifyLiveProbeIssue(error);
                         if (issue && workingQuotaCache) {
                             quotaCacheChanged =
                                 updateQuotaCacheIssueForAccount(workingQuotaCache, account, issue, storage.accounts, modelInspection.normalized, quotaEmailFallbackState ?? undefined) || quotaCacheChanged;
                         }
                         const message = normalizeFailureDetail(error instanceof Error ? error.message : String(error), undefined);
-                        warnings += 1;
+                        if (!reauthDetectedByLiveProbe)
+                            warnings += 1;
                         healthDetail = `signed in and working (live check failed: ${message})`;
                     }
                 }
@@ -1731,11 +1766,16 @@ async function runHealthCheck(options = {}) {
                 healthDetail += account.reauthMessage
                     ? ` (re-login required: ${account.reauthMessage})`
                     : " (re-login required)";
-                warnings += 1;
             }
-            ok += 1;
+            const requiresReauth = account.requiresReauth === true;
+            if (requiresReauth) {
+                failed += 1;
+            }
+            else {
+                ok += 1;
+            }
             if (display.showPerAccountRows) {
-                console.log(`  ${stylePromptText("✓", "success")} ${labelText} ${stylePromptText("|", "muted")} ${styleAccountDetailText(healthDetail)}`);
+                console.log(`  ${stylePromptText(requiresReauth ? "✗" : "✓", requiresReauth ? "danger" : "success")} ${labelText} ${stylePromptText("|", "muted")} ${styleAccountDetailText(healthDetail)}`);
             }
             continue;
         }
@@ -1782,8 +1822,8 @@ async function runHealthCheck(options = {}) {
             if (i === activeIndex) {
                 activeAccountRefreshed = true;
             }
-            ok += 1;
             let healthyMessage = "working now";
+            let reauthDetectedByLiveProbe = false;
             if (liveProbe) {
                 const probeAccountId = account.accountId ?? tokenAccountId;
                 if (!probeAccountId) {
@@ -1803,21 +1843,45 @@ async function runHealthCheck(options = {}) {
                                 updateQuotaCacheForAccount(workingQuotaCache, account, snapshot, storage.accounts, quotaEmailFallbackState ?? undefined) || quotaCacheChanged;
                         }
                         healthyMessage = formatQuotaSnapshotForDashboard(snapshot, display);
+                        if (clearAccessTokenReauthAfterLiveProbeSuccess(account)) {
+                            changed = true;
+                        }
                     }
                     catch (error) {
+                        reauthDetectedByLiveProbe =
+                            classifyAccessTokenFailureForReauth({
+                                message: error instanceof Error ? error.message : String(error),
+                            }) !== null;
+                        if (reauthDetectedByLiveProbe &&
+                            markLiveProbeReauthIfNeeded(account, error)) {
+                            changed = true;
+                        }
                         const issue = classifyLiveProbeIssue(error);
                         if (issue && workingQuotaCache) {
                             quotaCacheChanged =
                                 updateQuotaCacheIssueForAccount(workingQuotaCache, account, issue, storage.accounts, modelInspection.normalized, quotaEmailFallbackState ?? undefined) || quotaCacheChanged;
                         }
                         const message = normalizeFailureDetail(error instanceof Error ? error.message : String(error), undefined);
-                        warnings += 1;
+                        if (!reauthDetectedByLiveProbe)
+                            warnings += 1;
                         healthyMessage = `working now (live check failed: ${message})`;
                     }
                 }
             }
+            if (account.requiresReauth === true) {
+                healthyMessage += account.reauthMessage
+                    ? ` (re-login required: ${account.reauthMessage})`
+                    : " (re-login required)";
+            }
+            const requiresReauth = account.requiresReauth === true;
+            if (requiresReauth) {
+                failed += 1;
+            }
+            else {
+                ok += 1;
+            }
             if (display.showPerAccountRows) {
-                console.log(`  ${stylePromptText("✓", "success")} ${labelText} ${stylePromptText("|", "muted")} ${styleAccountDetailText(healthyMessage)}`);
+                console.log(`  ${stylePromptText(requiresReauth ? "✗" : "✓", requiresReauth ? "danger" : "success")} ${labelText} ${stylePromptText("|", "muted")} ${styleAccountDetailText(healthyMessage)}`);
             }
         }
         else {
@@ -1856,7 +1920,7 @@ async function runHealthCheck(options = {}) {
         activeIndex >= 0 &&
         activeIndex < storage.accounts.length) {
         const activeAccount = storage.accounts[activeIndex];
-        if (activeAccount) {
+        if (activeAccount && activeAccount.requiresReauth !== true) {
             await setCodexCliActiveSelection({
                 accountId: activeAccount.accountId,
                 email: activeAccount.email,

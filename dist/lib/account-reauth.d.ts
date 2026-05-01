@@ -1,4 +1,4 @@
-export declare const ACCOUNT_REAUTH_REASONS: readonly ["refresh-token-reused", "refresh-token-invalid", "refresh-failed"];
+export declare const ACCOUNT_REAUTH_REASONS: readonly ["access-token-invalidated", "refresh-token-reused", "refresh-token-invalid", "refresh-failed"];
 export type AccountReauthReason = (typeof ACCOUNT_REAUTH_REASONS)[number];
 export type AccountReauthMetadata = {
     requiresReauth?: boolean;
@@ -18,6 +18,7 @@ export type AccountReauthRequirement = {
 export declare function classifyRefreshFailureForReauth(failure: TokenFailureLike, options?: {
     sessionUsable?: boolean;
 }): AccountReauthRequirement | null;
+export declare function classifyAccessTokenFailureForReauth(failure: TokenFailureLike): AccountReauthRequirement | null;
 export declare function markAccountReauthRequired(account: AccountReauthMetadata, requirement: AccountReauthRequirement, now: number): boolean;
 export declare function clearAccountReauthRequired(account: AccountReauthMetadata): boolean;
 export {};

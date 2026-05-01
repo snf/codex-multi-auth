@@ -142,6 +142,14 @@ export function evaluateForecastAccount(input) {
         riskScore += 95;
         reasons.push("account is disabled");
     }
+    if (account.requiresReauth === true) {
+        availability = "unavailable";
+        riskScore += 95;
+        hardFailure = true;
+        reasons.push(account.reauthMessage
+            ? `re-login required: ${redactSensitiveReason(account.reauthMessage).slice(0, 160)}`
+            : "re-login required");
+    }
     if (input.refreshFailure) {
         const hard = isHardRefreshFailure(input.refreshFailure);
         hardFailure = hard;

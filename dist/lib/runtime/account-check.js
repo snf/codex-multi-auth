@@ -1,5 +1,5 @@
 import { maskEmail } from "../logger.js";
-import { classifyRefreshFailureForReauth, clearAccountReauthRequired, markAccountReauthRequired, } from "../account-reauth.js";
+import { classifyAccessTokenFailureForReauth, classifyRefreshFailureForReauth, clearAccountReauthRequired, markAccountReauthRequired, } from "../account-reauth.js";
 export async function runRuntimeAccountCheck(deepProbe, deps) {
     const loadedStorage = await deps.hydrateEmails(await deps.loadAccounts());
     const workingStorage = loadedStorage
@@ -180,12 +180,23 @@ export async function runRuntimeAccountCheck(deepProbe, deps) {
                     accountId: requestAccountId,
                     accessToken,
                 });
+                if (account.reauthReason === "access-token-invalidated" &&
+                    clearAccountReauthRequired(account)) {
+                    state.storageChanged = true;
+                }
                 state.ok += 1;
                 deps.showLine(`[${i + 1}/${total}] ${label}: ${deps.formatCodexQuotaLine(snapshot)}`);
             }
             catch (error) {
                 state.errors += 1;
                 const message = error instanceof Error ? error.message : String(error);
+                const reauthRequirement = classifyAccessTokenFailureForReauth({
+                    message,
+                });
+                if (reauthRequirement &&
+                    markAccountReauthRequired(account, reauthRequirement, nowMs)) {
+                    state.storageChanged = true;
+                }
                 deps.showLine(`[${i + 1}/${total}] ${label}: ERROR (${message.slice(0, 160)})`);
             }
         }

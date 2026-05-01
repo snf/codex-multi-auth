@@ -89,6 +89,7 @@ export type CooldownReasonFromSchema = z.infer<typeof CooldownReasonSchema>;
  * Reason an account needs a fresh OAuth login.
  */
 export declare const AccountReauthReasonSchema: z.ZodEnum<{
+    "access-token-invalidated": "access-token-invalidated";
     "refresh-token-reused": "refresh-token-reused";
     "refresh-token-invalid": "refresh-token-invalid";
     "refresh-failed": "refresh-failed";
@@ -145,6 +146,7 @@ export declare const AccountMetadataV3Schema: z.ZodObject<{
     }>>;
     requiresReauth: z.ZodOptional<z.ZodBoolean>;
     reauthReason: z.ZodOptional<z.ZodEnum<{
+        "access-token-invalidated": "access-token-invalidated";
         "refresh-token-reused": "refresh-token-reused";
         "refresh-token-invalid": "refresh-token-invalid";
         "refresh-failed": "refresh-failed";
@@ -198,6 +200,7 @@ export declare const AccountStorageV3Schema: z.ZodObject<{
         }>>;
         requiresReauth: z.ZodOptional<z.ZodBoolean>;
         reauthReason: z.ZodOptional<z.ZodEnum<{
+            "access-token-invalidated": "access-token-invalidated";
             "refresh-token-reused": "refresh-token-reused";
             "refresh-token-invalid": "refresh-token-invalid";
             "refresh-failed": "refresh-failed";
@@ -360,6 +363,7 @@ export declare const AnyAccountStorageSchema: z.ZodDiscriminatedUnion<[z.ZodObje
         }>>;
         requiresReauth: z.ZodOptional<z.ZodBoolean>;
         reauthReason: z.ZodOptional<z.ZodEnum<{
+            "access-token-invalidated": "access-token-invalidated";
             "refresh-token-reused": "refresh-token-reused";
             "refresh-token-invalid": "refresh-token-invalid";
             "refresh-failed": "refresh-failed";

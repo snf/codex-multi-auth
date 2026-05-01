@@ -15,6 +15,9 @@ const log = createLogger("accounts");
 function initFamilyState(defaultValue) {
     return Object.fromEntries(MODEL_FAMILIES.map((family) => [family, defaultValue]));
 }
+function isAccountEnabledForUse(account) {
+    return account.enabled !== false && account.requiresReauth !== true;
+}
 export class AccountManager {
     accounts = [];
     cursorByFamily = initFamilyState(0);
@@ -248,7 +251,7 @@ export class AccountManager {
         const account = this.getAccountByIndex(index);
         if (!account)
             return false;
-        if (account.enabled === false)
+        if (!isAccountEnabledForUse(account))
             return false;
         clearExpiredRateLimits(account);
         return !isRateLimitedForFamily(account, family, model) && !this.isAccountCoolingDown(account);
@@ -261,7 +264,7 @@ export class AccountManager {
         const account = this.accounts[index];
         if (!account)
             return null;
-        if (account.enabled === false)
+        if (!isAccountEnabledForUse(account))
             return null;
         for (const family of MODEL_FAMILIES) {
             this.currentAccountIndexByFamily[family] = index;
@@ -297,7 +300,7 @@ export class AccountManager {
             return null;
         }
         const account = this.accounts[index];
-        if (!account || account.enabled === false) {
+        if (!account || !isAccountEnabledForUse(account)) {
             return null;
         }
         return account;
@@ -315,7 +318,7 @@ export class AccountManager {
             const account = this.accounts[idx];
             if (!account)
                 continue;
-            if (account.enabled === false)
+            if (!isAccountEnabledForUse(account))
                 continue;
             clearExpiredRateLimits(account);
             if (isRateLimitedForFamily(account, family, model) || this.isAccountCoolingDown(account)) {
@@ -338,7 +341,7 @@ export class AccountManager {
             const account = this.accounts[idx];
             if (!account)
                 continue;
-            if (account.enabled === false)
+            if (!isAccountEnabledForUse(account))
                 continue;
             clearExpiredRateLimits(account);
             if (isRateLimitedForFamily(account, family, model) || this.isAccountCoolingDown(account)) {
@@ -358,7 +361,7 @@ export class AccountManager {
         if (currentIndex >= 0 && currentIndex < count) {
             const currentAccount = this.accounts[currentIndex];
             if (currentAccount) {
-                if (currentAccount.enabled === false) {
+                if (!isAccountEnabledForUse(currentAccount)) {
                     // Fall through to hybrid selection.
                 }
                 else {
@@ -378,7 +381,7 @@ export class AccountManager {
             .map((account) => {
             if (!account)
                 return null;
-            if (account.enabled === false)
+            if (!isAccountEnabledForUse(account))
                 return null;
             clearExpiredRateLimits(account);
             const isAvailable = !isRateLimitedForFamily(account, family, model) && !this.isAccountCoolingDown(account);
@@ -511,7 +514,7 @@ export class AccountManager {
     }
     getMinWaitTimeForFamily(family, model) {
         const now = nowMs();
-        const enabledAccounts = this.accounts.filter((account) => account.enabled !== false);
+        const enabledAccounts = this.accounts.filter((account) => isAccountEnabledForUse(account));
         const available = enabledAccounts.filter((account) => {
             clearExpiredRateLimits(account);
             return !isRateLimitedForFamily(account, family, model) && !this.isAccountCoolingDown(account);
