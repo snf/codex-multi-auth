@@ -3089,6 +3089,59 @@ describe("codex manager cli commands", () => {
 		).toBe(true);
 	});
 
+	it("marks invalidated OAuth token probe failures as requiring re-login during auth check", async () => {
+		const now = Date.now();
+		loadAccountsMock.mockResolvedValueOnce({
+			version: 3,
+			activeIndex: 0,
+			activeIndexByFamily: { codex: 0 },
+			accounts: [
+				{
+					accountId: "acc-invalidated",
+					email: "invalidated@example.com",
+					refreshToken: "refresh-invalidated",
+					accessToken: "access-invalidated",
+					expiresAt: now + 60 * 60 * 1000,
+					addedAt: now - 1_000,
+					lastUsed: now - 1_000,
+					enabled: true,
+				},
+			],
+		});
+		fetchCodexQuotaSnapshotMock.mockRejectedValueOnce(
+			new Error(
+				"Your authentication token has been invalidated. Please try signing in again.",
+			),
+		);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const { runCodexMultiAuthCli } = await import("../lib/codex-manager.js");
+
+		const exitCode = await runCodexMultiAuthCli(["auth", "check"]);
+
+		expect(exitCode).toBe(0);
+		expect(saveAccountsMock).toHaveBeenCalledWith({
+			version: 3,
+			activeIndex: 0,
+			activeIndexByFamily: { codex: 0 },
+			accounts: [
+				expect.objectContaining({
+					accountId: "acc-invalidated",
+					requiresReauth: true,
+					reauthReason: "access-token-invalidated",
+					reauthMessage:
+						"Your authentication token has been invalidated. Please try signing in again.",
+					reauthDetectedAt: expect.any(Number),
+				}),
+			],
+		});
+		expect(setCodexCliActiveSelectionMock).not.toHaveBeenCalled();
+		const output = logSpy.mock.calls.map((call) => String(call[0])).join("\n");
+		expect(output).toContain("re-login required");
+		expect(output).toContain("0 working");
+		expect(output).toContain("1 need re-login");
+		expect(output).toContain("0 warnings");
+	});
+
 	it("does not mutate loaded quota cache when live check account save fails", async () => {
 		const now = Date.now();
 		const originalQuotaCache = {
@@ -3545,6 +3598,7 @@ describe("codex manager cli commands", () => {
 				resetAtMs: now + 2_000,
 			},
 		});
+		setCodexCliActiveSelectionMock.mockResolvedValueOnce(true);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const { runCodexMultiAuthCli } = await import("../lib/codex-manager.js");
 
@@ -3561,7 +3615,15 @@ describe("codex manager cli commands", () => {
 			expect.objectContaining({ model: "gpt-5.1" }),
 		);
 		expect(saveAccountsMock).not.toHaveBeenCalled();
-		expect(setCodexCliActiveSelectionMock).not.toHaveBeenCalled();
+		expect(setCodexCliActiveSelectionMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				accountId: "acc_best",
+				email: "best@example.com",
+				accessToken: "access-best",
+				refreshToken: "refresh-best",
+				expiresAt: now + 3_600_000,
+			}),
+		);
 		expect(
 			logSpy.mock.calls.some((call) =>
 				String(call[0]).includes("Already on best account 1"),
@@ -3755,6 +3817,7 @@ describe("codex manager cli commands", () => {
 				resetAtMs: now + 120_000,
 			},
 		});
+		setCodexCliActiveSelectionMock.mockResolvedValueOnce(true);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const { runCodexMultiAuthCli } = await import("../lib/codex-manager.js");
 
@@ -3767,16 +3830,26 @@ describe("codex manager cli commands", () => {
 
 		expect(exitCode).toBe(0);
 		expect(saveAccountsMock).not.toHaveBeenCalled();
-		expect(setCodexCliActiveSelectionMock).not.toHaveBeenCalled();
+		expect(setCodexCliActiveSelectionMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				accountId: "acc_best",
+				email: "best@example.com",
+				accessToken: "access-best",
+				refreshToken: "refresh-best",
+				expiresAt: now + 3_600_000,
+			}),
+		);
 		const payload = JSON.parse(String(logSpy.mock.calls[0]?.[0])) as {
 			message: string;
 			accountIndex: number;
 			reason: string;
+			synced?: boolean;
 			probeErrors?: string[];
 		};
 		expect(payload.message).toContain("Already on best account");
 		expect(payload.accountIndex).toBe(1);
 		expect(payload.reason.toLowerCase()).toContain("shortest wait");
+		expect(payload.synced).toBe(true);
 		expect(payload.probeErrors).toBeUndefined();
 	});
 
@@ -3802,6 +3875,7 @@ describe("codex manager cli commands", () => {
 		fetchCodexQuotaSnapshotMock.mockRejectedValueOnce(
 			new Error("network timeout"),
 		);
+		setCodexCliActiveSelectionMock.mockResolvedValueOnce(true);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const { runCodexMultiAuthCli } = await import("../lib/codex-manager.js");
 
@@ -3809,7 +3883,15 @@ describe("codex manager cli commands", () => {
 
 		expect(exitCode).toBe(0);
 		expect(saveAccountsMock).not.toHaveBeenCalled();
-		expect(setCodexCliActiveSelectionMock).not.toHaveBeenCalled();
+		expect(setCodexCliActiveSelectionMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				accountId: "acc_best",
+				email: "best@example.com",
+				accessToken: "access-best",
+				refreshToken: "refresh-best",
+				expiresAt: now + 3_600_000,
+			}),
+		);
 		expect(
 			logSpy.mock.calls.some((call) =>
 				String(call[0]).includes("Already on best account 1"),
@@ -6527,6 +6609,65 @@ describe("codex manager cli commands", () => {
 				},
 			},
 			byEmail: {},
+		});
+	});
+
+	it("persists re-login markers discovered by menu auto-fetch", async () => {
+		const now = Date.now();
+		loadAccountsMock.mockResolvedValue({
+			version: 3,
+			activeIndex: 0,
+			activeIndexByFamily: { codex: 0 },
+			accounts: [
+				{
+					email: "invalidated@example.com",
+					accountId: "acc-invalidated",
+					refreshToken: "refresh-invalidated",
+					accessToken: "access-invalidated",
+					expiresAt: now + 60 * 60 * 1000,
+					addedAt: now - 1_000,
+					lastUsed: now - 1_000,
+					enabled: true,
+				},
+			],
+		});
+		loadDashboardDisplaySettingsMock.mockResolvedValue({
+			showPerAccountRows: true,
+			showQuotaDetails: true,
+			showForecastReasons: true,
+			showRecommendations: true,
+			showLiveProbeNotes: true,
+			menuAutoFetchLimits: true,
+			menuSortEnabled: false,
+			menuSortMode: "manual",
+			menuSortPinCurrent: true,
+			menuSortQuickSwitchVisibleRow: true,
+		});
+		loadQuotaCacheMock.mockResolvedValue({ byAccountId: {}, byEmail: {} });
+		fetchCodexQuotaSnapshotMock.mockRejectedValueOnce(
+			new Error(
+				"Your authentication token has been invalidated. Please try signing in again.",
+			),
+		);
+		promptLoginModeMock.mockResolvedValueOnce({ mode: "cancel" });
+
+		const { runCodexMultiAuthCli } = await import("../lib/codex-manager.js");
+		const exitCode = await runCodexMultiAuthCli(["auth", "login"]);
+
+		expect(exitCode).toBe(0);
+		expect(saveQuotaCacheMock).not.toHaveBeenCalled();
+		expect(saveAccountsMock).toHaveBeenCalledWith({
+			version: 3,
+			activeIndex: 0,
+			activeIndexByFamily: { codex: 0 },
+			accounts: [
+				expect.objectContaining({
+					requiresReauth: true,
+					reauthReason: "access-token-invalidated",
+					reauthMessage:
+						"Your authentication token has been invalidated. Please try signing in again.",
+				}),
+			],
 		});
 	});
 

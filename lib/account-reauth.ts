@@ -1,4 +1,5 @@
 export const ACCOUNT_REAUTH_REASONS = [
+	"access-token-invalidated",
 	"refresh-token-reused",
 	"refresh-token-invalid",
 	"refresh-failed",
@@ -173,6 +174,29 @@ export function classifyRefreshFailureForReauth(
 		failure.reason !== "unknown"
 	) {
 		return { reason: "refresh-failed", message };
+	}
+
+	return null;
+}
+
+export function classifyAccessTokenFailureForReauth(
+	failure: TokenFailureLike,
+): AccountReauthRequirement | null {
+	const codes = collectFailureCodes(failure);
+	const text = failureText(failure);
+	const message = formatReauthMessage(failure);
+
+	if (
+		codes.has("invalid_token") ||
+		codes.has("token_invalidated") ||
+		codes.has("access_token_invalidated") ||
+		text.includes("authentication token has been invalidated") ||
+		text.includes("access token has been invalidated") ||
+		text.includes("oauth token has been invalidated") ||
+		text.includes("token has been invalidated") ||
+		text.includes("invalid bearer token")
+	) {
+		return { reason: "access-token-invalidated", message };
 	}
 
 	return null;

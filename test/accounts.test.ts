@@ -459,6 +459,35 @@ describe("AccountManager", () => {
     expect(manager.getActiveIndex()).toBe(1);
   });
 
+  it("skips accounts that require re-login", () => {
+    const now = Date.now();
+    const stored = {
+      version: 3 as const,
+      activeIndex: 0,
+      accounts: [
+        {
+          refreshToken: "token-1",
+          addedAt: now,
+          lastUsed: now,
+          requiresReauth: true,
+          reauthReason: "access-token-invalidated" as const,
+        },
+        {
+          refreshToken: "token-2",
+          addedAt: now,
+          lastUsed: now,
+        },
+      ],
+    };
+
+    const manager = new AccountManager(undefined, stored);
+    expect(manager.getCurrentAccount()).toBeNull();
+    expect(manager.isAccountAvailableForFamily(0, "codex")).toBe(false);
+    const account = manager.getCurrentOrNext();
+    expect(account?.refreshToken).toBe("token-2");
+    expect(manager.getActiveIndex()).toBe(1);
+  });
+
   it("returns min wait time when all accounts are blocked", () => {
     const now = Date.now();
     const stored = {
@@ -2083,6 +2112,31 @@ describe("AccountManager", () => {
       
       const secondCall = manager.getCurrentOrNextForFamilyHybrid("codex");
       expect(secondCall?.index).toBe(selected?.index);
+    });
+
+    it("excludes re-login accounts from hybrid best-account selection", () => {
+      const now = Date.now();
+      const stored = {
+        version: 3 as const,
+        activeIndex: 0,
+        activeIndexByFamily: { codex: 0 },
+        accounts: [
+          {
+            refreshToken: "token-1",
+            addedAt: now,
+            lastUsed: now - 100_000,
+            requiresReauth: true,
+            reauthReason: "access-token-invalidated" as const,
+          },
+          { refreshToken: "token-2", addedAt: now, lastUsed: now },
+        ],
+      };
+
+      const manager = new AccountManager(undefined, stored as never);
+      const selected = manager.getCurrentOrNextForFamilyHybrid("codex");
+
+      expect(selected?.refreshToken).toBe("token-2");
+      expect(selected?.index).toBe(1);
     });
 
     it("falls back to least-recently-used when all accounts are rate-limited", () => {

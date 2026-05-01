@@ -4,6 +4,10 @@ import {
 	type BestCommandDeps,
 	runBestCommand,
 } from "../lib/codex-manager/commands/best.js";
+import {
+	evaluateForecastAccounts,
+	recommendForecastAccount,
+} from "../lib/forecast.js";
 import type { AccountStorageV3 } from "../lib/storage.js";
 
 function createAccount(
@@ -153,8 +157,18 @@ describe("runBestCommand", () => {
 		const deps = createDeps();
 		const result = await runBestCommand([], deps);
 		expect(result).toBe(0);
+		expect(deps.setCodexCliActiveSelection).toHaveBeenCalledWith({
+			accountId: undefined,
+			email: "best@example.com",
+			accessToken: "access-best",
+			refreshToken: "refresh-best",
+			expiresAt: expect.any(Number),
+		});
 		expect(deps.logInfo).toHaveBeenCalledWith(
 			expect.stringContaining('"accountIndex": 1'),
+		);
+		expect(deps.logInfo).toHaveBeenCalledWith(
+			expect.stringContaining('"synced": true'),
 		);
 	});
 
@@ -288,7 +302,13 @@ describe("runBestCommand", () => {
 
 		expect(result).toBe(0);
 		expect(deps.saveAccounts).toHaveBeenCalledTimes(1);
-		expect(deps.setCodexCliActiveSelection).not.toHaveBeenCalled();
+		expect(deps.setCodexCliActiveSelection).toHaveBeenCalledWith({
+			accountId: undefined,
+			email: "best@example.com",
+			accessToken: "best-access",
+			refreshToken: "best-refresh",
+			expiresAt: 10_000,
+		});
 		expect(deps.saveAccounts).toHaveBeenCalledWith(
 			expect.objectContaining({
 				accounts: [
@@ -367,5 +387,76 @@ describe("runBestCommand", () => {
 				switchReason: "best",
 			}),
 		);
+	});
+
+	it("marks live invalidated OAuth tokens before choosing the best account", async () => {
+		const now = 1_700_000_000_000;
+		const storage = createStorage([
+			createAccount({
+				email: "bad@example.com",
+				accountId: "bad-account",
+				refreshToken: "refresh-bad",
+				accessToken: "access-bad",
+				expiresAt: now + 60_000,
+				lastUsed: now - 100_000,
+			}),
+			createAccount({
+				email: "good@example.com",
+				accountId: "good-account",
+				refreshToken: "refresh-good",
+				accessToken: "access-good",
+				expiresAt: now + 60_000,
+				lastUsed: now - 10_000,
+			}),
+		]);
+		const persistAndSyncSelectedAccount = vi.fn(async () => ({
+			synced: true,
+			wasDisabled: false,
+		}));
+		const deps = createDeps({
+			loadAccounts: vi.fn(async () => storage),
+			parseBestArgs: vi.fn(() => ({
+				ok: true,
+				options: {
+					live: true,
+					json: true,
+					model: "gpt-5-codex",
+					modelProvided: false,
+				} satisfies BestCliOptions,
+			})),
+			fetchCodexQuotaSnapshot: vi
+				.fn()
+				.mockRejectedValueOnce(
+					new Error(
+						"Your authentication token has been invalidated. Please try signing in again.",
+					),
+				)
+				.mockResolvedValueOnce({
+					status: 200,
+					model: "gpt-5-codex",
+					primary: {},
+					secondary: {},
+				}),
+			evaluateForecastAccounts,
+			recommendForecastAccount,
+			resolveActiveIndex: vi.fn(() => 0),
+			persistAndSyncSelectedAccount,
+			getNow: vi.fn(() => now),
+		});
+
+		const result = await runBestCommand([], deps);
+
+		expect(result).toBe(0);
+		expect(persistAndSyncSelectedAccount).toHaveBeenCalledWith(
+			expect.objectContaining({
+				targetIndex: 1,
+			}),
+		);
+		const persistedStorage =
+			persistAndSyncSelectedAccount.mock.calls[0]?.[0].storage;
+		expect(persistedStorage.accounts[0]).toMatchObject({
+			requiresReauth: true,
+			reauthReason: "access-token-invalidated",
+		});
 	});
 });

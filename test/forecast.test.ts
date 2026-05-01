@@ -27,6 +27,28 @@ describe("forecast helpers", () => {
 		expect(result.disabled).toBe(true);
 	});
 
+	it("marks re-login accounts as hard failures", () => {
+		const now = 1_700_000_000_000;
+		const result = evaluateForecastAccount({
+			index: 0,
+			now,
+			isCurrent: true,
+			account: {
+				refreshToken: "refresh-1",
+				addedAt: now - 1_000,
+				lastUsed: now - 1_000,
+				requiresReauth: true,
+				reauthReason: "access-token-invalidated",
+				reauthMessage:
+					"Your authentication token has been invalidated. Please try signing in again.",
+			},
+		});
+
+		expect(result.availability).toBe("unavailable");
+		expect(result.hardFailure).toBe(true);
+		expect(result.reasons.join(" ")).toContain("re-login required");
+	});
+
 	it("detects hard refresh failures", () => {
 		expect(
 			isHardRefreshFailure({
@@ -112,6 +134,37 @@ describe("forecast helpers", () => {
 		expect(summary.total).toBe(2);
 		expect(summary.ready).toBe(1);
 		expect(summary.delayed).toBe(1);
+	});
+
+	it("does not recommend accounts that require re-login", () => {
+		const now = 1_700_000_000_000;
+		const results = evaluateForecastAccounts([
+			{
+				index: 0,
+				now,
+				isCurrent: true,
+				account: {
+					refreshToken: "refresh-1",
+					addedAt: now - 100_000,
+					lastUsed: now - 100_000,
+					requiresReauth: true,
+					reauthReason: "access-token-invalidated",
+				},
+			},
+			{
+				index: 1,
+				now,
+				isCurrent: false,
+				account: {
+					refreshToken: "refresh-2",
+					addedAt: now - 100_000,
+					lastUsed: now - 10_000,
+				},
+			},
+		]);
+
+		const recommendation = recommendForecastAccount(results);
+		expect(recommendation.recommendedIndex).toBe(1);
 	});
 
 	it("redacts sensitive refresh warning details", () => {

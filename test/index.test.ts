@@ -991,6 +991,32 @@ describe("OpenAIOAuthPlugin", () => {
 			const result = await plugin.tool["codex-health"].execute();
 			expect(result).toContain("Health Check");
 			expect(result).toContain("Healthy");
+			expect(mockStorage.accounts[0]).toMatchObject({
+				refreshToken: "refreshed-refresh",
+				accessToken: "refreshed-access",
+			});
+		});
+
+		it("marks refresh-token reuse failures during health checks", async () => {
+			const { queuedRefresh } = await import("../lib/refresh-queue.js");
+			vi.mocked(queuedRefresh).mockResolvedValueOnce({
+				type: "failed" as const,
+				reason: "http_error",
+				statusCode: 400,
+				message:
+					'{"error":{"message":"Your refresh token has already been used to generate a new access token.","code":"refresh_token_reused"}}',
+			});
+			mockStorage.accounts = [
+				{ refreshToken: "r1", email: "user@example.com" },
+			];
+
+			const result = await plugin.tool["codex-health"].execute();
+
+			expect(result).toContain("Token refresh failed");
+			expect(mockStorage.accounts[0]).toMatchObject({
+				requiresReauth: true,
+				reauthReason: "refresh-token-reused",
+			});
 		});
 	});
 
@@ -4227,5 +4253,4 @@ describe("reloadRuntimeAccountManager", () => {
 		expect(accountReloadInFlight).toBeNull();
 	});
 });
-
 

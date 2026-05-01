@@ -170,7 +170,7 @@ describe("AccountMetadataV3Schema", () => {
 			coolingDownUntil: Date.now() + 30000,
 			cooldownReason: "auth-failure" as const,
 			requiresReauth: true,
-			reauthReason: "refresh-token-reused" as const,
+			reauthReason: "access-token-invalidated" as const,
 			reauthMessage: "Refresh token was already used",
 			reauthDetectedAt: Date.now(),
 		};

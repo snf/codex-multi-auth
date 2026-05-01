@@ -52,6 +52,11 @@ import {
 } from "./lib/auth/auth.js";
 import { isBrowserLaunchSuppressed, openBrowserUrl } from "./lib/auth/browser.js";
 import { startLocalOAuthServer } from "./lib/auth/server.js";
+import {
+	classifyRefreshFailureForReauth,
+	clearAccountReauthRequired,
+	markAccountReauthRequired,
+} from "./lib/account-reauth.js";
 import { checkAndNotify } from "./lib/auto-update-checker.js";
 import { CapabilityPolicyStore } from "./lib/capability-policy.js";
 import { promptAddAnotherAccount, promptLoginMode } from "./lib/cli.js";
@@ -3628,6 +3633,7 @@ export const OpenAIOAuthPlugin: Plugin = async ({ client }: PluginInput) => {
 
 					let healthyCount = 0;
 					let unhealthyCount = 0;
+					let changed = false;
 
 					for (let i = 0; i < storage.accounts.length; i++) {
 						const account = storage.accounts[i];
@@ -3637,11 +3643,40 @@ export const OpenAIOAuthPlugin: Plugin = async ({ client }: PluginInput) => {
 						try {
 							const refreshResult = await queuedRefresh(account.refreshToken);
 							if (refreshResult.type === "success") {
+								if (account.refreshToken !== refreshResult.refresh) {
+									account.refreshToken = refreshResult.refresh;
+									changed = true;
+								}
+								if (account.accessToken !== refreshResult.access) {
+									account.accessToken = refreshResult.access;
+									changed = true;
+								}
+								if (account.expiresAt !== refreshResult.expires) {
+									account.expiresAt = refreshResult.expires;
+									changed = true;
+								}
+								if (clearAccountReauthRequired(account)) {
+									changed = true;
+								}
 								results.push(
 									`  ${getStatusMarker(ui, "ok")} ${label}: Healthy`,
 								);
 								healthyCount++;
 							} else {
+								const reauthRequirement =
+									classifyRefreshFailureForReauth(refreshResult, {
+										sessionUsable: false,
+									});
+								if (
+									reauthRequirement &&
+									markAccountReauthRequired(
+										account,
+										reauthRequirement,
+										Date.now(),
+									)
+								) {
+									changed = true;
+								}
 								results.push(
 									`  ${getStatusMarker(ui, "error")} ${label}: Token refresh failed`,
 								);
@@ -3654,6 +3689,15 @@ export const OpenAIOAuthPlugin: Plugin = async ({ client }: PluginInput) => {
 								`  ${getStatusMarker(ui, "error")} ${label}: Error - ${errorMsg.slice(0, 120)}`,
 							);
 							unhealthyCount++;
+						}
+					}
+
+					if (changed) {
+						await saveAccounts(storage);
+						if (cachedAccountManager) {
+							await reloadRuntimeAccountManager<AccountManager>(
+								makeReloadAccountManagerDeps(),
+							);
 						}
 					}
 
@@ -3872,11 +3916,23 @@ export const OpenAIOAuthPlugin: Plugin = async ({ client }: PluginInput) => {
 											account.refreshToken = refreshResult.refresh;
 											account.accessToken = refreshResult.access;
 											account.expiresAt = refreshResult.expires;
+											clearAccountReauthRequired(account);
 											results.push(
 												`  ${getStatusMarker(ui, "ok")} ${label}: Refreshed`,
 											);
 											refreshedCount++;
 										} else {
+											const reauthRequirement =
+												classifyRefreshFailureForReauth(refreshResult, {
+													sessionUsable: false,
+												});
+											if (reauthRequirement) {
+												markAccountReauthRequired(
+													account,
+													reauthRequirement,
+													Date.now(),
+												);
+											}
 											results.push(
 												`  ${getStatusMarker(ui, "error")} ${label}: Failed - ${refreshResult.message ?? refreshResult.reason}`,
 											);

@@ -1,4 +1,9 @@
 import type { ForecastAccountResult } from "../../forecast.js";
+import {
+	classifyAccessTokenFailureForReauth,
+	clearAccountReauthRequired,
+	markAccountReauthRequired,
+} from "../../account-reauth.js";
 import type { CodexQuotaSnapshot } from "../../quota-probe.js";
 import { resolveNormalizedModel } from "../../request/helpers/model-map.js";
 import type { AccountStorageV3 } from "../../storage.js";
@@ -174,6 +179,7 @@ export async function runBestCommand(
 				account.accountId = refreshedAccountId;
 				account.accountIdSource = "token";
 			}
+			if (clearAccountReauthRequired(account)) changed = true;
 			changed =
 				changed ||
 				previousRefreshToken !== account.refreshToken ||
@@ -204,11 +210,26 @@ export async function runBestCommand(
 				model: probeModel,
 			});
 			liveQuotaByIndex.set(i, liveQuota);
+			if (
+				account.reauthReason === "access-token-invalidated" &&
+				clearAccountReauthRequired(account)
+			) {
+				changed = true;
+			}
 		} catch (error) {
 			const message = deps.normalizeFailureDetail(
 				error instanceof Error ? error.message : String(error),
 				undefined,
 			);
+			const reauthRequirement = classifyAccessTokenFailureForReauth({
+				message,
+			});
+			if (
+				reauthRequirement &&
+				markAccountReauthRequired(account, reauthRequirement, now)
+			) {
+				changed = true;
+			}
 			probeErrors.push(`${deps.formatAccountLabel(account, i)}: ${message}`);
 		}
 	}
@@ -264,29 +285,23 @@ export async function runBestCommand(
 
 	const currentIndex = deps.resolveActiveIndex(storage, "codex");
 	if (currentIndex === bestIndex) {
-		const shouldSyncCurrentBest =
-			probeRefreshedIndices.has(bestIndex) ||
-			probeIdTokenByIndex.has(bestIndex);
-		let alreadyBestSynced: boolean | undefined;
 		await persistProbeChangesIfNeeded(() => {
 			bestAccount.lastUsed = now;
 		});
-		if (shouldSyncCurrentBest) {
-			alreadyBestSynced = await deps.setCodexCliActiveSelection({
-				accountId: bestAccount.accountId,
-				email: bestAccount.email,
-				accessToken: bestAccount.accessToken,
-				refreshToken: bestAccount.refreshToken,
-				expiresAt: bestAccount.expiresAt,
-				...(probeIdTokenByIndex.has(bestIndex)
-					? { idToken: probeIdTokenByIndex.get(bestIndex) }
-					: {}),
-			});
-			if (!alreadyBestSynced && !options.json) {
-				logWarn(
-					"Codex auth sync did not complete. Multi-auth routing will still use this account.",
-				);
-			}
+		const alreadyBestSynced = await deps.setCodexCliActiveSelection({
+			accountId: bestAccount.accountId,
+			email: bestAccount.email,
+			accessToken: bestAccount.accessToken,
+			refreshToken: bestAccount.refreshToken,
+			expiresAt: bestAccount.expiresAt,
+			...(probeIdTokenByIndex.has(bestIndex)
+				? { idToken: probeIdTokenByIndex.get(bestIndex) }
+				: {}),
+		});
+		if (!alreadyBestSynced && !options.json) {
+			logWarn(
+				"Codex auth sync did not complete. Multi-auth routing will still use this account.",
+			);
 		}
 		if (options.json) {
 			logInfo(
